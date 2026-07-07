@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "schwab",
+  "project_id": "5bbe3b62-805c-46a4-8d9b-648ee07e8d0f"
+}
