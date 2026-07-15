@@ -1,0 +1,28 @@
+[package]
+name = "schwab"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "schwab"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+calamine = "0.26"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+crossterm = { version = "0.28", features = ["event-stream"] }
+csv = "1"
+dirs = "5"
+futures-util = "0.3"
+ratatui = "0.29"
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+url = "2"
+urlencoding = "2"
+webbrowser = "1"
