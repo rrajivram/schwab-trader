@@ -39,13 +39,23 @@ enum Commands {
     Tui,
     /// Show stored credentials and token status
     Status,
-    /// Submit a single-leg market BUY order. Prints the request body and
-    /// exits without sending anything unless --live is passed.
+    /// Submit a single-leg BUY order. Prints the request body and exits
+    /// without sending anything unless --live is passed.
     Order {
-        /// Stock symbol, e.g. F
+        /// Stock ticker (equity) or CUSIP (fixed-income), e.g. F or
+        /// 912797FZ0.
         symbol: String,
         #[arg(long)]
         quantity: f64,
+        /// EQUITY submits a MARKET order (the default). FIXED_INCOME
+        /// (bonds/Treasuries) submits a LIMIT order and requires --price;
+        /// this path has never been tested against Schwab's live endpoint.
+        #[arg(long, value_enum, default_value = "equity")]
+        asset_type: orders::AssetType,
+        /// Limit price for --asset-type fixed-income. Ignored for equity
+        /// orders (which are always MARKET).
+        #[arg(long)]
+        price: Option<f64>,
         /// Schwab account hash to trade in. Defaults to the single linked
         /// account, resolved live (account hashes can go stale, so the
         /// TUI-cached one in config is deliberately not used here).
@@ -75,8 +85,8 @@ async fn main() -> Result<()> {
         Commands::Status => {
             config::print_status()?;
         }
-        Commands::Order { symbol, quantity, account_hash, live } => {
-            orders::place_order_cli(&symbol, quantity, account_hash, live).await?;
+        Commands::Order { symbol, quantity, asset_type, price, account_hash, live } => {
+            orders::place_order_cli(&symbol, quantity, asset_type, price, account_hash, live).await?;
         }
     }
 

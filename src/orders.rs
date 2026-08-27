@@ -1,10 +1,26 @@
 use anyhow::{bail, Result};
+use clap::ValueEnum;
 use serde_json::{json, Value};
 
 use crate::auth::get_valid_token;
 use crate::rebalance::RebalancePlan;
 
 const ORDERS_URL: &str = "https://api.schwabapi.com/trader/v1/accounts";
+
+/// Which instrument type an order is for. `FixedIncome` (bonds, Treasuries)
+/// is CONFIRMED NON-FUNCTIONAL: a live order (CUSIP 912797UJ4, oversized
+/// quantity, LIMIT @ 99.584) got a 400 straight from schema validation —
+/// "Valid value for `assetType` is [EQUITY, OPTION]" — not a buying-power
+/// rejection. Schwab's Trader API does not accept order submissions for
+/// bonds regardless of size/price; `FIXED_INCOME` only shows up when
+/// *reading* existing positions. Kept here as a documented dead end rather
+/// than deleted, in case a different app registration/account tier ever
+/// changes this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum AssetType {
+    Equity,
+    FixedIncome,
+}
 
 #[derive(Debug, Clone)]
 pub enum OrderOutcome {
@@ -28,27 +44,60 @@ pub struct OrderResult {
     pub outcome: OrderOutcome,
 }
 
-/// Build a single-leg market BUY order. Quantity is a JSON number and can
-/// carry a fractional value — whether Schwab's endpoint actually *accepts* a
-/// fractional quantity for a given account/symbol is UNCONFIRMED. This has
-/// deliberately never been tested against a live submission; that requires
-/// an explicit, separate go-ahead before it's attempted, since a rejected
-/// assumption here means real (if small) money movement.
-fn build_order_body(symbol: &str, quantity: f64) -> Value {
-    json!({
-        "orderType": "MARKET",
+/// Build a single-leg BUY order. Quantity is a JSON number and can carry a
+/// fractional value for equities — whether Schwab's endpoint actually
+/// *accepts* a fractional quantity for a given account/symbol is
+/// UNCONFIRMED. This has deliberately never been tested against a live
+/// submission; that requires an explicit, separate go-ahead before it's
+/// attempted, since a rejected assumption here means real (if small) money
+/// movement.
+///
+/// `symbol_or_cusip` is a ticker for `Equity` orders, and a CUSIP for
+/// `FixedIncome` orders (bonds are identified by CUSIP, not ticker).
+/// `price` is required (and used as a `LIMIT` price) for `FixedIncome`
+/// orders — bonds are never submitted as `MARKET` orders here — and ignored
+/// for `Equity` orders, which stay `MARKET` as before.
+fn build_order_body(asset_type: AssetType, symbol_or_cusip: &str, quantity: f64, price: Option<f64>) -> Result<Value> {
+    let (order_type, instrument, extra_price) = match asset_type {
+        AssetType::Equity => (
+            "MARKET",
+            json!({
+                "symbol": symbol_or_cusip,
+                "assetType": "EQUITY"
+            }),
+            None,
+        ),
+        AssetType::FixedIncome => {
+            let Some(price) = price else {
+                bail!("--price is required for fixed-income orders (bonds don't trade at MARKET)");
+            };
+            (
+                "LIMIT",
+                json!({
+                    "symbol": symbol_or_cusip,
+                    "cusip": symbol_or_cusip,
+                    "assetType": "FIXED_INCOME"
+                }),
+                Some(price),
+            )
+        }
+    };
+
+    let mut body = json!({
+        "orderType": order_type,
         "session": "NORMAL",
         "duration": "DAY",
         "orderStrategyType": "SINGLE",
         "orderLegCollection": [{
             "instruction": "BUY",
             "quantity": round_quantity(quantity),
-            "instrument": {
-                "symbol": symbol,
-                "assetType": "EQUITY"
-            }
+            "instrument": instrument
         }]
-    })
+    });
+    if let Some(price) = extra_price {
+        body["price"] = json!(price);
+    }
+    Ok(body)
 }
 
 /// `target_shares` is a raw float (e.g. `0.26724343162931624`) — round to 6
@@ -81,12 +130,49 @@ mod tests {
         assert_eq!(request_body["orderLegCollection"][0]["quantity"], 0.267243);
         assert_eq!(request_body["orderLegCollection"][0]["instruction"], "BUY");
     }
+
+    #[test]
+    fn fixed_income_order_is_a_limit_order_with_cusip_and_price() {
+        let outcome = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(submit_order_as("hash123", AssetType::FixedIncome, "912797FZ0", 1000.0, Some(99.5), true))
+            .unwrap();
+        let OrderOutcome::DryRun { request_body } = outcome else { panic!("expected DryRun") };
+        assert_eq!(request_body["orderType"], "LIMIT");
+        assert_eq!(request_body["price"], 99.5);
+        let instrument = &request_body["orderLegCollection"][0]["instrument"];
+        assert_eq!(instrument["assetType"], "FIXED_INCOME");
+        assert_eq!(instrument["cusip"], "912797FZ0");
+    }
+
+    #[test]
+    fn fixed_income_order_without_price_is_rejected() {
+        let err = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(submit_order_as("hash123", AssetType::FixedIncome, "912797FZ0", 1000.0, None, true))
+            .unwrap_err();
+        assert!(err.to_string().contains("--price is required"));
+    }
 }
 
-/// Submit one order leg. `dry_run = true` builds and returns the request
-/// body without sending anything.
+/// Submit one equity order leg (market BUY). `dry_run = true` builds and
+/// returns the request body without sending anything.
 pub async fn submit_order(account_hash: &str, symbol: &str, quantity: f64, dry_run: bool) -> Result<OrderOutcome> {
-    let body = build_order_body(symbol, quantity);
+    submit_order_as(account_hash, AssetType::Equity, symbol, quantity, None, dry_run).await
+}
+
+/// Submit one order leg of any supported asset type. `dry_run = true`
+/// builds and returns the request body without sending anything. See
+/// `build_order_body` for what `price` means per asset type.
+pub async fn submit_order_as(
+    account_hash: &str,
+    asset_type: AssetType,
+    symbol_or_cusip: &str,
+    quantity: f64,
+    price: Option<f64>,
+    dry_run: bool,
+) -> Result<OrderOutcome> {
+    let body = build_order_body(asset_type, symbol_or_cusip, quantity, price)?;
     if dry_run {
         return Ok(OrderOutcome::DryRun { request_body: body });
     }
@@ -141,6 +227,8 @@ pub async fn submit_plan(plan: &RebalancePlan, dry_run: bool) -> Vec<OrderResult
 pub async fn place_order_cli(
     symbol: &str,
     quantity: f64,
+    asset_type: AssetType,
+    price: Option<f64>,
     account_hash: Option<String>,
     live: bool,
 ) -> Result<()> {
@@ -156,7 +244,12 @@ pub async fn place_order_cli(
         }
     };
 
-    let outcome = submit_order(&account_hash, &symbol.to_uppercase(), quantity, !live).await?;
+    // CUSIPs aren't uppercased/normalized the way tickers are.
+    let symbol_or_cusip = match asset_type {
+        AssetType::Equity => symbol.to_uppercase(),
+        AssetType::FixedIncome => symbol.to_string(),
+    };
+    let outcome = submit_order_as(&account_hash, asset_type, &symbol_or_cusip, quantity, price, !live).await?;
     match outcome {
         OrderOutcome::DryRun { request_body } => {
             println!("Dry run — request body that would be sent:");
