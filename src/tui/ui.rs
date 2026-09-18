@@ -11,10 +11,12 @@ use ratatui::{
 use super::app::{
     AccountSelectPhase, AccountSelectState, AmountEntryState, App, AppScreen, BlacklistFocus,
     BlacklistState, DeleteTarget, IndexLookupPhase, IndexLookupState, Mode, NewListFocus, NewListState,
-    PlanReviewPhase, PlanReviewState, SubmitPhase, SubmitState,
+    PlanReviewPhase, PlanReviewState, PriceGridPhase, PriceGridState, PriceInputFocus, PriceInputState,
+    SubmitPhase, SubmitState,
 };
 use crate::accounts::Account;
 use crate::orders::OrderOutcome;
+use crate::pricing::PriceGrid;
 use crate::rebalance::RebalancePlan;
 use crate::registry::{holdings::CachedHoldings, RegistryEntry};
 
@@ -29,6 +31,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         AppScreen::AmountEntry(state) => render_amount_entry(frame, state, area),
         AppScreen::PlanReview(state) => render_plan_review(frame, state, area),
         AppScreen::Submitting(state) => render_submitting(frame, state, area),
+        AppScreen::PriceInput(state) => render_price_input(frame, state, area),
+        AppScreen::PriceGrid(state) => render_price_grid_screen(frame, state, area),
     }
 }
 
@@ -332,7 +336,13 @@ fn render_new_list(frame: &mut Frame, state: &NewListState, area: Rect) {
         Paragraph::new(format!("{}_", state.name)).style(Style::default().fg(Color::White)),
         chunks[1],
     );
-    frame.render_widget(Paragraph::new(""), chunks[2]);
+    let hint = if state.name.trim().is_empty() {
+        Paragraph::new("Name required — type one, then Enter to create")
+            .style(Style::default().fg(Color::Red))
+    } else {
+        Paragraph::new("")
+    };
+    frame.render_widget(hint, chunks[2]);
 
     let src_label_style = if state.focus == NewListFocus::Source {
         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
@@ -937,6 +947,217 @@ fn render_order_detail(frame: &mut Frame, r: &crate::orders::OrderResult, area: 
         Paragraph::new("[Esc/Enter/v] close").style(Style::default().fg(Color::DarkGray)),
         chunks[1],
     );
+}
+
+// ── Price input screen ──────────────────────────────────────────────────────────
+
+fn field_line(label: &str, value: &str, focused: bool) -> Line<'static> {
+    let label_style = if focused {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let value_style = if focused {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    let suffix = if focused { "_" } else { "" };
+    Line::from(vec![
+        Span::styled(format!("{label} "), label_style),
+        Span::styled(format!("{value}{suffix}"), value_style),
+    ])
+}
+
+fn render_price_input(frame: &mut Frame, state: &PriceInputState, area: Rect) {
+    let block = Block::default()
+        .title(" Options Pricing — Black-Scholes Grid ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::vertical([
+        Constraint::Length(1), // symbol
+        Constraint::Length(1), // expiry
+        Constraint::Length(1), // iv
+        Constraint::Length(1), // option type
+        Constraint::Length(1), // rate
+        Constraint::Length(1), // dividend yield
+        Constraint::Length(1), // spacer
+        Constraint::Length(1), // error
+        Constraint::Min(0),
+        Constraint::Length(1), // footer
+    ])
+    .split(inner);
+
+    frame.render_widget(
+        Paragraph::new(field_line("Symbol:", &state.symbol, state.focus == PriceInputFocus::Symbol)),
+        chunks[0],
+    );
+    frame.render_widget(
+        Paragraph::new(field_line("Expiry (YYYY-MM-DD):", &state.expiry, state.focus == PriceInputFocus::Expiry)),
+        chunks[1],
+    );
+    frame.render_widget(
+        Paragraph::new(field_line("Base IV (e.g. 0.30):", &state.iv, state.focus == PriceInputFocus::Iv)),
+        chunks[2],
+    );
+
+    let option_focused = state.focus == PriceInputFocus::OptionType;
+    let option_label_style = if option_focused {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let opt_style = |idx: usize| {
+        if idx == state.option_type_idx {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        }
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Option Type: ", option_label_style),
+            Span::styled(if state.option_type_idx == 0 { "▶ Call" } else { "  Call" }, opt_style(0)),
+            Span::raw("   "),
+            Span::styled(if state.option_type_idx == 1 { "▶ Put" } else { "  Put" }, opt_style(1)),
+        ])),
+        chunks[3],
+    );
+
+    frame.render_widget(
+        Paragraph::new(field_line("Rate (e.g. 0.045):", &state.rate, state.focus == PriceInputFocus::Rate)),
+        chunks[4],
+    );
+    frame.render_widget(
+        Paragraph::new(field_line(
+            "Dividend Yield (e.g. 0.0):",
+            &state.dividend_yield,
+            state.focus == PriceInputFocus::DividendYield,
+        )),
+        chunks[5],
+    );
+
+    if let Some(err) = &state.error {
+        frame.render_widget(Paragraph::new(err.as_str()).style(Style::default().fg(Color::Red)), chunks[7]);
+    }
+
+    frame.render_widget(
+        Paragraph::new("[Tab/Shift-Tab] next/prev field  [←→ on Type] toggle  [Enter] calculate  [Esc] back")
+            .style(Style::default().fg(Color::DarkGray)),
+        chunks[9],
+    );
+}
+
+// ── Price grid screen ───────────────────────────────────────────────────────────
+
+fn render_price_grid_screen(frame: &mut Frame, state: &mut PriceGridState, area: Rect) {
+    let block = Block::default()
+        .title(" Options Pricing — Black-Scholes Grid ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner);
+
+    match &state.phase {
+        PriceGridPhase::Loading => {
+            frame.render_widget(
+                Paragraph::new("Fetching live price and building grid…").style(Style::default().fg(Color::Yellow)),
+                chunks[0],
+            );
+            frame.render_widget(Paragraph::new("[Esc] cancel").style(Style::default().fg(Color::DarkGray)), chunks[1]);
+        }
+        PriceGridPhase::Error(e) => {
+            frame.render_widget(Paragraph::new(format!("Error: {e}")).style(Style::default().fg(Color::Red)), chunks[0]);
+            frame.render_widget(Paragraph::new("[Esc] back").style(Style::default().fg(Color::DarkGray)), chunks[1]);
+        }
+        PriceGridPhase::Loaded(grid) => {
+            render_price_grid_table(frame, grid, chunks[0]);
+            frame.render_widget(Paragraph::new("[Esc] back").style(Style::default().fg(Color::DarkGray)), chunks[1]);
+        }
+    }
+}
+
+fn render_price_grid_table(frame: &mut Frame, grid: &PriceGrid, area: Rect) {
+    let chunks = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).split(area);
+
+    let option_label = match grid.option_type {
+        crate::pricing::OptionType::Call => "CALL",
+        crate::pricing::OptionType::Put => "PUT",
+    };
+    let summary = Line::from(vec![
+        Span::styled(format!("{} {option_label}  ", grid.symbol), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!(
+                "spot {}  expiry {} ({:.2}y)  base IV {:.1}%  rate {:.2}%  div {:.2}%",
+                fmt_price(Some(grid.spot)),
+                grid.expiry,
+                grid.time_to_expiry_years,
+                grid.base_iv * 100.0,
+                grid.rate * 100.0,
+                grid.dividend_yield * 100.0,
+            ),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(summary), chunks[0]);
+
+    let base_iv_col = 5usize;
+    let atm_row = 5usize;
+
+    let header_cells = std::iter::once(Cell::from("Strike \\ IV").style(
+        Style::default().add_modifier(Modifier::BOLD).fg(Color::Cyan),
+    ))
+    .chain(grid.ivs.iter().enumerate().map(|(j, &iv)| {
+        let style = if j == base_iv_col {
+            Style::default().add_modifier(Modifier::BOLD).fg(Color::Yellow)
+        } else {
+            Style::default().add_modifier(Modifier::BOLD).fg(Color::Cyan)
+        };
+        Cell::from(format!("{:.1}%", iv * 100.0)).style(style)
+    }));
+    let header = Row::new(header_cells).height(1);
+
+    let rows: Vec<Row> = grid
+        .strikes
+        .iter()
+        .enumerate()
+        .map(|(i, &strike)| {
+            let strike_style = if i == atm_row {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+            };
+            let cells = std::iter::once(Cell::from(fmt_price(Some(strike))).style(strike_style)).chain(
+                grid.prices[i].iter().enumerate().map(|(j, &price)| {
+                    let style = if i == atm_row && j == base_iv_col {
+                        Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    } else if i == atm_row || j == base_iv_col {
+                        Style::default().fg(Color::Yellow)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    };
+                    Cell::from(fmt_price(Some(price))).style(style)
+                }),
+            );
+            Row::new(cells)
+        })
+        .collect();
+
+    let mut widths = vec![Constraint::Length(10)];
+    widths.extend(std::iter::repeat_n(Constraint::Length(8), grid.ivs.len()));
+
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded));
+
+    frame.render_widget(table, chunks[1]);
 }
 
 // ── Formatting helpers ─────────────────────────────────────────────────────────

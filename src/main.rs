@@ -5,6 +5,7 @@ mod blacklist;
 mod config;
 mod indices;
 mod orders;
+mod pricing;
 mod rebalance;
 mod registry;
 mod stream;
@@ -66,6 +67,32 @@ enum Commands {
         #[arg(long)]
         live: bool,
     },
+    /// Print a Black-Scholes theoretical price grid (11 strikes x 11 IVs,
+    /// each swept -50%..+50% around the live underlying price / base IV in
+    /// 10% steps) for a European-style approximation of an option.
+    Price {
+        /// Underlying stock symbol, e.g. AAPL. Its current price is fetched
+        /// live via the existing quotes API.
+        #[arg(long)]
+        symbol: String,
+        /// Option expiration date, YYYY-MM-DD. Must be in the future.
+        #[arg(long)]
+        expiry: String,
+        /// Base implied volatility as a decimal, e.g. 0.30 for 30%. Swept
+        /// -50%..+50% across the grid's columns.
+        #[arg(long)]
+        iv: f64,
+        #[arg(long, value_enum)]
+        option_type: pricing::OptionType,
+        /// Annualized risk-free rate. This codebase has no live rate
+        /// source, so this is a literal default, overridable via this flag.
+        #[arg(long, default_value_t = 0.045)]
+        rate: f64,
+        /// Annualized dividend yield. No live source; literal default,
+        /// overridable via this flag.
+        #[arg(long, default_value_t = 0.0)]
+        dividend_yield: f64,
+    },
 }
 
 #[tokio::main]
@@ -87,6 +114,9 @@ async fn main() -> Result<()> {
         }
         Commands::Order { symbol, quantity, asset_type, price, account_hash, live } => {
             orders::place_order_cli(&symbol, quantity, asset_type, price, account_hash, live).await?;
+        }
+        Commands::Price { symbol, expiry, iv, option_type, rate, dividend_yield } => {
+            pricing::run_price_cli(&symbol, &expiry, iv, option_type, rate, dividend_yield).await?;
         }
     }
 

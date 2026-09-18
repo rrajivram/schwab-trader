@@ -2,12 +2,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use chrono::NaiveDate;
 use ratatui::widgets::TableState;
 use tokio::sync::mpsc;
 
 use crate::accounts::Account;
 use crate::indices::Index;
 use crate::orders::OrderResult;
+use crate::pricing::{OptionType, PriceGrid};
 use crate::rebalance::RebalancePlan;
 use crate::registry::{holdings::CachedHoldings, RegistryEntry};
 use crate::stream::{QuoteUpdate, StreamCommand};
@@ -257,6 +259,110 @@ impl SubmitState {
     }
 }
 
+// ── Price grid screens ───────────────────────────────────────────────────────────
+
+#[derive(PartialEq)]
+pub enum PriceInputFocus {
+    Symbol,
+    Expiry,
+    Iv,
+    OptionType,
+    Rate,
+    DividendYield,
+}
+
+pub struct PriceInputState {
+    pub symbol: String,
+    pub expiry: String,
+    pub iv: String,
+    pub option_type_idx: usize, // 0 = Call, 1 = Put
+    pub rate: String,
+    pub dividend_yield: String,
+    pub focus: PriceInputFocus,
+    pub error: Option<String>,
+}
+
+impl PriceInputState {
+    pub fn new() -> Self {
+        Self {
+            symbol: String::new(),
+            expiry: String::new(),
+            iv: String::new(),
+            option_type_idx: 0,
+            rate: "0.045".to_string(),
+            dividend_yield: "0.0".to_string(),
+            focus: PriceInputFocus::Symbol,
+            error: None,
+        }
+    }
+
+    pub fn option_type(&self) -> OptionType {
+        if self.option_type_idx == 0 { OptionType::Call } else { OptionType::Put }
+    }
+
+    /// Validate all fields and build the request, or return a user-facing
+    /// error string — the same validation `pricing::build_price_grid` would
+    /// otherwise do, done here first so it surfaces before the async round-trip.
+    pub fn build_request(&self) -> Result<PriceRequest, String> {
+        let symbol = self.symbol.trim().to_uppercase();
+        if symbol.is_empty() {
+            return Err("Symbol is required.".to_string());
+        }
+
+        let expiry = NaiveDate::parse_from_str(self.expiry.trim(), "%Y-%m-%d")
+            .map_err(|_| "Expiry must be a valid date, YYYY-MM-DD.".to_string())?;
+        if expiry <= chrono::Utc::now().date_naive() {
+            return Err("Expiry must be in the future.".to_string());
+        }
+
+        let base_iv = self.iv.trim().parse::<f64>().map_err(|_| "IV must be a number, e.g. 0.30.".to_string())?;
+        if base_iv <= 0.0 {
+            return Err("IV must be greater than 0.".to_string());
+        }
+
+        let rate = self.rate.trim().parse::<f64>().map_err(|_| "Rate must be a number, e.g. 0.045.".to_string())?;
+        let dividend_yield = self
+            .dividend_yield
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| "Dividend yield must be a number, e.g. 0.0.".to_string())?;
+
+        Ok(PriceRequest { symbol, base_iv, expiry, rate, dividend_yield, option_type: self.option_type() })
+    }
+}
+
+/// Request sent to the price-grid-building task.
+pub struct PriceRequest {
+    pub symbol: String,
+    pub base_iv: f64,
+    pub expiry: NaiveDate,
+    pub rate: f64,
+    pub dividend_yield: f64,
+    pub option_type: OptionType,
+}
+
+/// Result of an async grid build, sent back over a channel.
+pub enum PriceGridResult {
+    Ready(PriceGrid),
+    Error(String),
+}
+
+pub enum PriceGridPhase {
+    Loading,
+    Loaded(PriceGrid),
+    Error(String),
+}
+
+pub struct PriceGridState {
+    pub phase: PriceGridPhase,
+}
+
+impl PriceGridState {
+    pub fn new() -> Self {
+        Self { phase: PriceGridPhase::Loading }
+    }
+}
+
 /// Top-level screen. `Watchlists` is today's existing behavior (driven by
 /// `Mode`); other variants are full-screen flows layered on top of it.
 pub enum AppScreen {
@@ -266,6 +372,8 @@ pub enum AppScreen {
     AmountEntry(AmountEntryState),
     PlanReview(PlanReviewState),
     Submitting(SubmitState),
+    PriceInput(PriceInputState),
+    PriceGrid(PriceGridState),
 }
 
 // ── App ────────────────────────────────────────────────────────────────────────
@@ -287,6 +395,7 @@ pub struct App {
     pub selected_account: Option<Account>,
     pub plan_tx: mpsc::Sender<PlanRequest>,
     pub submit_tx: mpsc::Sender<SubmitRequest>,
+    pub price_tx: mpsc::Sender<PriceRequest>,
 }
 
 impl App {
@@ -300,6 +409,7 @@ impl App {
         accounts_tx: mpsc::Sender<()>,
         plan_tx: mpsc::Sender<PlanRequest>,
         submit_tx: mpsc::Sender<SubmitRequest>,
+        price_tx: mpsc::Sender<PriceRequest>,
     ) -> Self {
         let mut table_state = TableState::default();
         if !watchlists.is_empty() && !watchlists[0].symbols.is_empty() {
@@ -322,6 +432,7 @@ impl App {
             selected_account: None,
             plan_tx,
             submit_tx,
+            price_tx,
         }
     }
 
@@ -629,5 +740,13 @@ impl App {
         let AppScreen::Submitting(ref mut state) = self.screen else { return };
         let SubmitPhase::Done { ref table_state, ref mut viewing, .. } = state.phase else { return };
         *viewing = if viewing.is_some() { None } else { table_state.selected() };
+    }
+
+    pub fn apply_price_grid_result(&mut self, result: PriceGridResult) {
+        let AppScreen::PriceGrid(ref mut state) = self.screen else { return };
+        state.phase = match result {
+            PriceGridResult::Ready(grid) => PriceGridPhase::Loaded(grid),
+            PriceGridResult::Error(e) => PriceGridPhase::Error(e),
+        };
     }
 }

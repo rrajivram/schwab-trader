@@ -3,7 +3,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use super::app::{
     AccountSelectPhase, AccountSelectState, AmountEntryState, App, AppScreen, BlacklistFocus,
     BlacklistState, DeleteTarget, IndexLookupPhase, IndexLookupState, Mode, NewListFocus, NewListState,
-    PlanRequest, PlanReviewPhase, PlanReviewState, SubmitRequest, SubmitState,
+    PlanRequest, PlanReviewPhase, PlanReviewState, PriceInputFocus, PriceInputState, SubmitRequest, SubmitState,
 };
 
 /// Handle a key event. Returns true if the app should quit.
@@ -15,6 +15,8 @@ pub fn handle_key(key: KeyEvent, app: &mut App) {
         AppScreen::AmountEntry(_) => handle_amount_entry(key, app),
         AppScreen::PlanReview(_) => handle_plan_review(key, app),
         AppScreen::Submitting(_) => handle_submitting(key, app),
+        AppScreen::PriceInput(_) => handle_price_input(key, app),
+        AppScreen::PriceGrid(_) => handle_price_grid(key, app),
     }
 }
 
@@ -114,6 +116,11 @@ fn handle_normal(key: KeyEvent, app: &mut App) {
         KeyCode::Char('A') => {
             app.screen = AppScreen::AccountSelect(AccountSelectState::new());
             let _ = app.accounts_tx.try_send(());
+        }
+
+        // Options pricing calculator (Black-Scholes grid)
+        KeyCode::Char('P') => {
+            app.screen = AppScreen::PriceInput(PriceInputState::new());
         }
 
         _ => {}
@@ -446,5 +453,91 @@ fn handle_confirm_delete(key: KeyEvent, app: &mut App) {
         }
         KeyCode::Char('n') | KeyCode::Esc => { app.mode = Mode::Normal; }
         _ => {}
+    }
+}
+
+// ── Price input / grid screens ────────────────────────────────────────────────
+
+fn handle_price_input(key: KeyEvent, app: &mut App) {
+    let AppScreen::PriceInput(ref mut state) = app.screen else { return };
+
+    match key.code {
+        KeyCode::Esc => { app.screen = AppScreen::Watchlists; }
+
+        KeyCode::Tab => {
+            state.focus = match state.focus {
+                PriceInputFocus::Symbol => PriceInputFocus::Expiry,
+                PriceInputFocus::Expiry => PriceInputFocus::Iv,
+                PriceInputFocus::Iv => PriceInputFocus::OptionType,
+                PriceInputFocus::OptionType => PriceInputFocus::Rate,
+                PriceInputFocus::Rate => PriceInputFocus::DividendYield,
+                PriceInputFocus::DividendYield => PriceInputFocus::Symbol,
+            };
+        }
+        KeyCode::BackTab => {
+            state.focus = match state.focus {
+                PriceInputFocus::Symbol => PriceInputFocus::DividendYield,
+                PriceInputFocus::Expiry => PriceInputFocus::Symbol,
+                PriceInputFocus::Iv => PriceInputFocus::Expiry,
+                PriceInputFocus::OptionType => PriceInputFocus::Iv,
+                PriceInputFocus::Rate => PriceInputFocus::OptionType,
+                PriceInputFocus::DividendYield => PriceInputFocus::Rate,
+            };
+        }
+
+        KeyCode::Enter => match state.build_request() {
+            Ok(req) => {
+                app.screen = AppScreen::PriceGrid(super::app::PriceGridState::new());
+                let _ = app.price_tx.try_send(req);
+            }
+            Err(msg) => { state.error = Some(msg); }
+        },
+
+        // Call/Put toggle — only when that field is focused.
+        KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
+            if state.focus == PriceInputFocus::OptionType =>
+        {
+            state.option_type_idx = 1 - state.option_type_idx;
+        }
+
+        KeyCode::Backspace => {
+            match state.focus {
+                PriceInputFocus::Symbol => { state.symbol.pop(); }
+                PriceInputFocus::Expiry => { state.expiry.pop(); }
+                PriceInputFocus::Iv => { state.iv.pop(); }
+                PriceInputFocus::Rate => { state.rate.pop(); }
+                PriceInputFocus::DividendYield => { state.dividend_yield.pop(); }
+                PriceInputFocus::OptionType => {}
+            }
+            state.error = None;
+        }
+        KeyCode::Char(c) => {
+            match state.focus {
+                PriceInputFocus::Symbol if c.is_alphanumeric() => {
+                    if state.symbol.len() < 12 { state.symbol.push(c.to_ascii_uppercase()); }
+                }
+                PriceInputFocus::Expiry if c.is_ascii_digit() || c == '-' => {
+                    if state.expiry.len() < 10 { state.expiry.push(c); }
+                }
+                PriceInputFocus::Iv if c.is_ascii_digit() || c == '.' => {
+                    if state.iv.len() < 10 { state.iv.push(c); }
+                }
+                PriceInputFocus::Rate if c.is_ascii_digit() || c == '.' => {
+                    if state.rate.len() < 10 { state.rate.push(c); }
+                }
+                PriceInputFocus::DividendYield if c.is_ascii_digit() || c == '.' => {
+                    if state.dividend_yield.len() < 10 { state.dividend_yield.push(c); }
+                }
+                _ => {}
+            }
+            state.error = None;
+        }
+        _ => {}
+    }
+}
+
+fn handle_price_grid(key: KeyEvent, app: &mut App) {
+    if key.code == KeyCode::Esc {
+        app.screen = AppScreen::Watchlists;
     }
 }

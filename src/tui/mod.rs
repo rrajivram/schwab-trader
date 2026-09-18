@@ -16,8 +16,8 @@ use futures_util::StreamExt;
 use ratatui::{backend::CrosstermBackend, Terminal};
 use tokio::sync::mpsc;
 
-use crate::{accounts, api, auth, blacklist, orders, rebalance, registry, stream, watchlist};
-use app::{App, AccountsResult, LookupResult, PlanBuildResult};
+use crate::{accounts, api, auth, blacklist, orders, pricing, rebalance, registry, stream, watchlist};
+use app::{App, AccountsResult, LookupResult, PlanBuildResult, PriceGridResult};
 
 pub async fn run() -> Result<()> {
     let _ = auth::get_valid_token().await?; // fail fast if not logged in
@@ -102,6 +102,29 @@ pub async fn run() -> Result<()> {
         }
     });
 
+    // Price-grid channel — receives a PriceRequest, fetches the live
+    // underlying price, builds the Black-Scholes grid, and sends the result back.
+    let (price_tx, mut price_rx) = mpsc::channel::<app::PriceRequest>(5);
+    let (price_result_tx, mut price_result_rx) = mpsc::channel::<PriceGridResult>(5);
+    tokio::spawn(async move {
+        while let Some(req) = price_rx.recv().await {
+            let result = match pricing::build_price_grid_live(
+                &req.symbol,
+                req.base_iv,
+                req.expiry,
+                req.rate,
+                req.dividend_yield,
+                req.option_type,
+            )
+            .await
+            {
+                Ok(grid) => PriceGridResult::Ready(grid),
+                Err(e) => PriceGridResult::Error(e.to_string()),
+            };
+            let _ = price_result_tx.try_send(result);
+        }
+    });
+
     // Order submission channel — receives a SubmitRequest, submits every
     // line in the plan (dry-run only from every current call site), and
     // sends the per-line results back.
@@ -143,6 +166,7 @@ pub async fn run() -> Result<()> {
         accounts_tx,
         plan_tx,
         submit_tx,
+        price_tx,
     );
 
     // Subscribe to the first tab's symbols right away
@@ -181,6 +205,10 @@ pub async fn run() -> Result<()> {
 
             Some(results) = submit_result_rx.recv() => {
                 app.apply_submit_result(results);
+            }
+
+            Some(result) = price_result_rx.recv() => {
+                app.apply_price_grid_result(result);
             }
         }
 
