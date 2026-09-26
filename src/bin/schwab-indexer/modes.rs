@@ -54,11 +54,12 @@ pub struct Line {
 }
 
 impl IndexerApp {
-    fn yields(&self) -> HashMap<String, f64> {
+    /// Auto's ranking metric: EPS.
+    fn eps_scores(&self) -> HashMap<String, f64> {
         self.market
             .value
             .as_ref()
-            .map(|m| m.iter().filter_map(|(s, md)| Some((s.clone(), md.div_yield?))).collect())
+            .map(|m| m.iter().filter_map(|(s, md)| Some((s.clone(), md.eps?))).collect())
             .unwrap_or_default()
     }
 
@@ -102,7 +103,7 @@ impl IndexerApp {
     pub(crate) fn current_replacements(&self) -> Vec<Pick> {
         let Some(u) = &self.universe.value else { return Vec::new() };
         let sectors: Vec<String> = self.discards.iter().filter_map(|s| self.index_weight(s).map(|(_, sec)| sec)).collect();
-        basket::replacements(u, &self.yields(), &self.auto_exclusions(), &sectors)
+        basket::replacements(u, &self.eps_scores(), &self.auto_exclusions(), &sectors)
     }
 
     pub(crate) fn create_panel(&mut self, ui: &mut egui::Ui) {
@@ -131,8 +132,8 @@ impl IndexerApp {
             auto = ui
                 .add_enabled(ready, egui::Button::new("Auto fill"))
                 .on_hover_text(
-                    "Skips do-not-transact and stocks you hold, then takes the highest dividend \
-                     yield from each sector (heaviest sector first), then the 2nd highest, …",
+                    "Skips do-not-transact and stocks you hold, then takes the highest EPS \
+                     from each sector (heaviest sector first), then the 2nd highest, …",
                 )
                 .on_disabled_hover_text("Waiting for quotes")
                 .clicked();
@@ -167,7 +168,7 @@ impl IndexerApp {
             if let Some(u) = &self.universe.value {
                 let mut exclude = self.auto_exclusions();
                 exclude.extend(self.pe_exclusions());
-                let picks = basket::auto_basket(u, &self.yields(), &exclude, self.auto_size);
+                let picks = basket::auto_basket(u, &self.eps_scores(), &exclude, self.auto_size);
                 self.auto_note = (picks.len() < self.auto_size)
                     .then(|| format!("Only {} stocks qualify — basket has {}.", picks.len(), picks.len()));
                 self.basket = picks.into_iter().map(|p| p.symbol).collect();
@@ -201,7 +202,7 @@ impl IndexerApp {
             }
             ui.separator();
             ui.strong("Replacements");
-            ui.weak("Each is the highest-yield stock in the next sector after the discard's.");
+            ui.weak("Each is the highest-EPS stock in the next sector after the discard's.");
             if replacements.is_empty() {
                 ui.weak("—");
             }
@@ -211,7 +212,8 @@ impl IndexerApp {
                     ticker_and_name(discard, &names[discard]),
                     ticker_and_name(&pick.symbol, &names[&pick.symbol])
                 ));
-                ui.weak(format!("      {}, yield {:.2}%", pick.sector, pick.div_yield));
+                let eps = pick.score.map(|e| format!("{e:.2}")).unwrap_or("—".into());
+                ui.weak(format!("      {}, EPS {eps}", pick.sector));
             }
             ui.separator();
             review = ui.add_enabled(!replacements.is_empty(), egui::Button::new("Review →")).clicked();

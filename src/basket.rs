@@ -2,9 +2,10 @@
 //!
 //! Auto logic: drop excluded stocks (do-not-transact, already held, ...),
 //! rescale the remaining index weights back to 100%, then walk the sectors
-//! heaviest-first taking each sector's highest-dividend-yield stock, and
-//! repeat (2nd highest, 3rd, ...) until the basket is full. Sectors that run
-//! out are skipped. Zero/unknown-yield stocks are eligible, ranked last.
+//! heaviest-first taking each sector's highest-scoring stock, and repeat
+//! (2nd highest, 3rd, ...) until the basket is full. Sectors that run out
+//! are skipped. The score is whatever the caller ranks by (the indexer uses
+//! EPS); stocks with no score are still eligible, ranked last.
 
 use std::collections::{HashMap, HashSet};
 
@@ -16,13 +17,13 @@ pub struct Pick {
     pub sector: String,
     /// Index weight rescaled over the non-excluded universe (fraction of 1).
     pub weight: f64,
-    /// Percent (2.4 = 2.4%); 0 when unknown.
-    pub div_yield: f64,
+    /// The ranking metric (EPS in the indexer); None when unknown.
+    pub score: Option<f64>,
 }
 
 /// Non-excluded candidates grouped by sector, sectors in index-weight order,
-/// each sector's list ranked best-first (yield, then weight, then symbol).
-fn ranked_by_sector(universe: &Universe, yields: &HashMap<String, f64>, exclude: &HashSet<String>) -> Vec<(String, Vec<Pick>)> {
+/// each sector's list ranked best-first (score, then weight, then symbol).
+fn ranked_by_sector(universe: &Universe, scores: &HashMap<String, f64>, exclude: &HashSet<String>) -> Vec<(String, Vec<Pick>)> {
     let remaining: f64 = universe
         .constituents
         .iter()
@@ -42,12 +43,14 @@ fn ranked_by_sector(universe: &Universe, yields: &HashMap<String, f64>, exclude:
                     symbol: c.symbol.clone(),
                     sector: c.sector.clone(),
                     weight: if remaining > 0.0 { c.weight / remaining } else { 0.0 },
-                    div_yield: yields.get(&c.symbol).copied().unwrap_or(0.0),
+                    score: scores.get(&c.symbol).copied(),
                 })
                 .collect();
             picks.sort_by(|a, b| {
-                b.div_yield
-                    .total_cmp(&a.div_yield)
+                // Unknown scores rank below every real one, negatives included.
+                let key = |p: &Pick| p.score.unwrap_or(f64::NEG_INFINITY);
+                key(b)
+                    .total_cmp(&key(a))
                     .then_with(|| b.weight.total_cmp(&a.weight))
                     .then_with(|| a.symbol.cmp(&b.symbol))
             });
@@ -57,8 +60,8 @@ fn ranked_by_sector(universe: &Universe, yields: &HashMap<String, f64>, exclude:
 }
 
 /// Auto mode: up to `size` stocks, round-robin across sectors.
-pub fn auto_basket(universe: &Universe, yields: &HashMap<String, f64>, exclude: &HashSet<String>, size: usize) -> Vec<Pick> {
-    let sectors = ranked_by_sector(universe, yields, exclude);
+pub fn auto_basket(universe: &Universe, scores: &HashMap<String, f64>, exclude: &HashSet<String>, size: usize) -> Vec<Pick> {
+    let sectors = ranked_by_sector(universe, scores, exclude);
     let mut out = Vec::with_capacity(size);
     for round in 0.. {
         let mut took_any = false;
@@ -87,11 +90,11 @@ pub fn auto_basket(universe: &Universe, yields: &HashMap<String, f64>, exclude: 
 /// anywhere is skipped.
 pub fn replacements(
     universe: &Universe,
-    yields: &HashMap<String, f64>,
+    scores: &HashMap<String, f64>,
     exclude: &HashSet<String>,
     discard_sectors: &[String],
 ) -> Vec<Pick> {
-    let mut sectors = ranked_by_sector(universe, yields, exclude);
+    let mut sectors = ranked_by_sector(universe, scores, exclude);
     let mut next_index = vec![0usize; sectors.len()];
     let mut out = Vec::new();
 
@@ -163,7 +166,7 @@ mod tests {
         }
     }
 
-    fn yields(rows: &[(&str, f64)]) -> HashMap<String, f64> {
+    fn scores(rows: &[(&str, f64)]) -> HashMap<String, f64> {
         rows.iter().map(|(s, y)| (s.to_string(), *y)).collect()
     }
 
@@ -181,22 +184,31 @@ mod tests {
             ("E2", "Energy", 0.1),
             ("U1", "Utilities", 0.1),
         ]);
-        let y = yields(&[("T1", 0.5), ("T2", 1.5), ("T3", 0.0), ("E1", 3.0), ("E2", 4.0), ("U1", 3.5)]);
+        // T3 has no score at all.
+        let y = scores(&[("T1", 0.5), ("T2", 1.5), ("E1", 3.0), ("E2", 4.0), ("U1", 3.5)]);
         (u, y)
     }
 
     #[test]
-    fn auto_round_robins_by_sector_weight_then_yield() {
+    fn auto_round_robins_by_sector_weight_then_score() {
         let (u, y) = sample();
         let b = auto_basket(&u, &y, &HashSet::new(), 5);
         assert_eq!(syms(&b), vec!["T2", "E2", "U1", "T1", "E1"]);
     }
 
     #[test]
-    fn auto_skips_exhausted_sectors_and_includes_zero_yield() {
+    fn auto_skips_exhausted_sectors_and_includes_unscored() {
         let (u, y) = sample();
         let b = auto_basket(&u, &y, &HashSet::new(), 10);
         assert_eq!(syms(&b), vec!["T2", "E2", "U1", "T1", "E1", "T3"]);
+    }
+
+    #[test]
+    fn negative_score_ranks_above_unknown() {
+        let u = universe(&[("A", "S", 0.5), ("B", "S", 0.4), ("C", "S", 0.1)]);
+        let y = scores(&[("A", -2.0), ("C", 1.0)]);
+        let b = auto_basket(&u, &y, &HashSet::new(), 3);
+        assert_eq!(syms(&b), vec!["C", "A", "B"]);
     }
 
     #[test]
