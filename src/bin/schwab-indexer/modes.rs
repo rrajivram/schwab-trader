@@ -7,6 +7,8 @@ use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 use schwab::api::MarketData;
 use schwab::basket::{self, Pick};
+use schwab::execution::PlannedOrder;
+use schwab::orders::Side;
 
 use crate::app::{money, ticker_and_name, ticker_with_name, IndexerApp};
 use crate::home::fmt_qty;
@@ -17,6 +19,8 @@ pub enum Mode {
     Create,
     Rebalance,
     Review,
+    /// Placing (or previewing) orders.
+    Execute,
 }
 
 pub struct Review {
@@ -31,6 +35,8 @@ pub struct Review {
     pub message: Option<String>,
     /// (index into `REVIEW_COLUMNS`, ascending); None keeps the pick order.
     pub sort: Option<(usize, bool)>,
+    /// Confirm dialog open, holding its "preview only" checkbox state.
+    pub confirm: Option<bool>,
 }
 
 /// Review table headers; all but the trailing remove-button column sort.
@@ -218,6 +224,7 @@ impl IndexerApp {
             add_input: String::new(),
             message: None,
             sort: None,
+            confirm: None,
         });
         self.mode = Mode::Review;
     }
@@ -230,6 +237,8 @@ impl IndexerApp {
         let market = self.market.value.clone().unwrap_or_default();
         let mut back = false;
         let mut add = None;
+        let mut planned_buys = Vec::new();
+        let mut skipped = Vec::new();
 
         egui::CentralPanel::default().show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -361,10 +370,29 @@ impl IndexerApp {
                 .zip(&prices)
                 .filter_map(|(a, p)| Some(a.quantity * (*p)?))
                 .sum();
+            for ((line, a), price) in review.lines.iter().zip(&alloc).zip(&prices) {
+                match price {
+                    Some(p) if a.quantity > 0.0 => planned_buys.push(PlannedOrder {
+                        side: Side::Buy,
+                        symbol: line.symbol.clone(),
+                        schwab_symbol: line.symbol.replace('.', "/"),
+                        quantity: a.quantity,
+                        est_price: *p,
+                    }),
+                    _ => skipped.push(line.symbol.clone()),
+                }
+            }
             ui.separator();
             ui.horizontal(|ui| {
                 ui.strong(format!("{} stocks · buys total {}", review.lines.len(), money(spent)));
                 ui.weak(format!("· {} left over from rounding shares down", money(review.amount - spent)));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let can_place = !planned_buys.is_empty() || (review.rebalance && !review.sells.is_empty());
+                    let place = egui::Button::new(egui::RichText::new("Place orders…").strong());
+                    if ui.add_enabled(can_place, place).clicked() {
+                        review.confirm = Some(true);
+                    }
+                });
             });
             ui.horizontal(|ui| {
                 let resp = ui.add(egui::TextEdit::singleline(&mut review.add_input).hint_text("Add symbol").desired_width(90.0));
@@ -375,7 +403,6 @@ impl IndexerApp {
                 if ui.button("Reset to index weights").clicked() {
                     reset_weights(&mut review.lines);
                 }
-                ui.weak("Suggestions only — no orders are placed.");
             });
             if let Some(msg) = &review.message {
                 ui.colored_label(ui.visuals().warn_fg_color, msg);
@@ -400,10 +427,15 @@ impl IndexerApp {
             }
         }
 
+        let launch = self.confirm_modal(ui, &mut review, planned_buys, &skipped, &market);
+
         if back {
             self.mode = if review.rebalance { Mode::Rebalance } else { Mode::Create };
         } else {
             self.review = Some(review);
+        }
+        if let Some(plan) = launch {
+            self.start_execution(plan);
         }
     }
 

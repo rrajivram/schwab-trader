@@ -6,8 +6,10 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use eframe::egui;
 
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
-use schwab::{accounts, api, auth, dividends, universe};
+use schwab::{accounts, api, auth, dividends, execution, universe};
 
 pub enum Msg {
     /// Startup token check: Ok means a usable (possibly refreshed) token exists.
@@ -18,6 +20,8 @@ pub enum Msg {
     UniverseLoaded(Result<universe::Universe, String>),
     MarketLoaded(Result<HashMap<String, api::MarketData>, String>),
     DividendsLoaded(Result<HashMap<String, f64>, String>),
+    /// Streamed progress from an order run.
+    Exec(execution::ExecEvent),
 }
 
 pub struct Worker {
@@ -105,6 +109,18 @@ impl Worker {
         self.spawn(async move {
             let result = dividends::dividends_by_symbol(&account_hash, &held_symbols).await;
             Msg::DividendsLoaded(result.map_err(|e| e.to_string()))
+        });
+    }
+
+    pub fn run_orders(&self, plan: execution::Plan, cancel: Arc<AtomicBool>) {
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        self.rt.spawn(async move {
+            execution::run(plan, cancel, move |ev| {
+                let _ = tx.send(Msg::Exec(ev));
+                ctx.request_repaint();
+            })
+            .await;
         });
     }
 }

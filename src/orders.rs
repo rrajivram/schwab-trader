@@ -58,6 +58,25 @@ pub struct OrderResult {
 /// orders — bonds are never submitted as `MARKET` orders here — and ignored
 /// for `Equity` orders, which stay `MARKET` as before.
 fn build_order_body(asset_type: AssetType, symbol_or_cusip: &str, quantity: f64, price: Option<f64>) -> Result<Value> {
+    build_order_body_with(Side::Buy, asset_type, symbol_or_cusip, quantity, price)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Buy,
+    Sell,
+}
+
+impl Side {
+    pub fn instruction(self) -> &'static str {
+        match self {
+            Side::Buy => "BUY",
+            Side::Sell => "SELL",
+        }
+    }
+}
+
+fn build_order_body_with(side: Side, asset_type: AssetType, symbol_or_cusip: &str, quantity: f64, price: Option<f64>) -> Result<Value> {
     let (order_type, instrument, extra_price) = match asset_type {
         AssetType::Equity => (
             "MARKET",
@@ -89,7 +108,7 @@ fn build_order_body(asset_type: AssetType, symbol_or_cusip: &str, quantity: f64,
         "duration": "DAY",
         "orderStrategyType": "SINGLE",
         "orderLegCollection": [{
-            "instruction": "BUY",
+            "instruction": side.instruction(),
             "quantity": round_quantity(quantity),
             "instrument": instrument
         }]
@@ -173,6 +192,17 @@ pub async fn submit_order_as(
     dry_run: bool,
 ) -> Result<OrderOutcome> {
     let body = build_order_body(asset_type, symbol_or_cusip, quantity, price)?;
+    send_order(account_hash, body, dry_run).await
+}
+
+/// MARKET/DAY equity order in either direction. `symbol` must be in
+/// Schwab's form (`BRK/B`, not `BRK.B`).
+pub async fn submit_equity(account_hash: &str, side: Side, symbol: &str, quantity: f64, dry_run: bool) -> Result<OrderOutcome> {
+    let body = build_order_body_with(side, AssetType::Equity, symbol, quantity, None)?;
+    send_order(account_hash, body, dry_run).await
+}
+
+async fn send_order(account_hash: &str, body: Value, dry_run: bool) -> Result<OrderOutcome> {
     if dry_run {
         return Ok(OrderOutcome::DryRun { request_body: body });
     }
@@ -268,4 +298,100 @@ pub async fn place_order_cli(
         }
     }
     Ok(())
+}
+
+/// An order's progress, from GET on the `Location` URL Schwab returns when
+/// the order is placed. Shape verified against live filled orders.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct OrderStatus {
+    /// Schwab status, e.g. WORKING, QUEUED, FILLED, REJECTED, CANCELED.
+    pub status: String,
+    pub filled_quantity: f64,
+    pub remaining_quantity: f64,
+    /// Σ quantity × price over all execution legs.
+    pub fill_value: f64,
+    pub description: Option<String>,
+}
+
+impl OrderStatus {
+    /// No further fills can happen.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self.status.as_str(), "FILLED" | "REJECTED" | "CANCELED" | "EXPIRED" | "REPLACED")
+    }
+
+    pub fn avg_price(&self) -> Option<f64> {
+        (self.filled_quantity > 0.0).then(|| self.fill_value / self.filled_quantity)
+    }
+}
+
+pub fn parse_order_status(v: &Value) -> OrderStatus {
+    let fill_value = v["orderActivityCollection"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|a| a["executionLegs"].as_array().into_iter().flatten())
+        .map(|leg| leg["quantity"].as_f64().unwrap_or(0.0) * leg["price"].as_f64().unwrap_or(0.0))
+        .sum();
+    OrderStatus {
+        status: v["status"].as_str().unwrap_or("UNKNOWN").to_string(),
+        filled_quantity: v["filledQuantity"].as_f64().unwrap_or(0.0),
+        remaining_quantity: v["remainingQuantity"].as_f64().unwrap_or(0.0),
+        fill_value,
+        description: v["statusDescription"].as_str().map(str::to_string),
+    }
+}
+
+/// Fetch an order's status from the `Location` URL returned on submission.
+pub async fn get_order_status(order_location: &str) -> Result<OrderStatus> {
+    let token = get_valid_token().await?;
+    let resp = reqwest::Client::new()
+        .get(order_location)
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        bail!("order status request failed ({status}): {body}");
+    }
+    Ok(parse_order_status(&resp.json::<Value>().await?))
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    #[test]
+    fn sell_body_uses_sell_instruction() {
+        let body = build_order_body_with(Side::Sell, AssetType::Equity, "BRK/B", 1.25, None).unwrap();
+        assert_eq!(body["orderType"], "MARKET");
+        assert_eq!(body["orderLegCollection"][0]["instruction"], "SELL");
+        assert_eq!(body["orderLegCollection"][0]["instrument"]["symbol"], "BRK/B");
+    }
+
+    /// Trimmed from a live FILLED order response.
+    #[test]
+    fn parses_fills_from_execution_legs() {
+        let v = serde_json::json!({
+            "status": "FILLED",
+            "quantity": 33.0,
+            "filledQuantity": 33.0,
+            "remainingQuantity": 0.0,
+            "orderActivityCollection": [{
+                "activityType": "EXECUTION",
+                "executionLegs": [{"legId": 1, "quantity": 33.0, "price": 98.874975}]
+            }]
+        });
+        let s = parse_order_status(&v);
+        assert!(s.is_terminal());
+        assert!((s.fill_value - 33.0 * 98.874975).abs() < 1e-9);
+        assert!((s.avg_price().unwrap() - 98.874975).abs() < 1e-9);
+    }
+
+    #[test]
+    fn working_order_is_not_terminal() {
+        let s = parse_order_status(&serde_json::json!({"status": "WORKING", "filledQuantity": 0.0}));
+        assert!(!s.is_terminal());
+        assert_eq!(s.avg_price(), None);
+    }
 }

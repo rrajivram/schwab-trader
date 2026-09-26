@@ -8,6 +8,7 @@ pub mod basket;
 pub mod blacklist;
 pub mod config;
 pub mod dividends;
+pub mod execution;
 pub mod indices;
 pub mod orders;
 pub mod portfolio;

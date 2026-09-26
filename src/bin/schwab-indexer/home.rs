@@ -154,9 +154,10 @@ enum Action {
 impl IndexerApp {
     pub(crate) fn home_ui(&mut self, ui: &mut egui::Ui) {
         self.top_bar(ui);
-        if self.mode == Mode::Review {
-            self.review_ui(ui);
-            return;
+        match self.mode {
+            Mode::Review => return self.review_ui(ui),
+            Mode::Execute => return self.execute_ui(ui),
+            _ => {}
         }
         if self.show_dnt_panel {
             self.dnt_panel(ui);
@@ -164,7 +165,7 @@ impl IndexerApp {
         match self.mode {
             Mode::Create => self.create_panel(ui),
             Mode::Rebalance => self.rebalance_panel(ui),
-            Mode::Browse | Mode::Review => {}
+            Mode::Browse | Mode::Review | Mode::Execute => {}
         }
         egui::CentralPanel::default().show(ui, |ui| self.sectors_ui(ui));
     }
@@ -216,7 +217,8 @@ impl IndexerApp {
                     }
                     ui.toggle_value(&mut self.show_dnt_panel, format!("Do not transact ({})", self.dnt.len()));
                     ui.separator();
-                    let ready = self.universe.value.is_some();
+                    // No switching modes while orders are being placed/tracked.
+                    let ready = self.universe.value.is_some() && self.mode != Mode::Execute;
                     for (mode, label, hover) in [
                         (Mode::Rebalance, "Rebalance", "Replace losing holdings"),
                         (Mode::Create, "Create", "Build a new basket"),
@@ -335,7 +337,7 @@ impl IndexerApp {
                                 self.discards.contains(&c.symbol),
                                 !dnt && held.is_some_and(Held::is_losing),
                             ),
-                            Mode::Browse | Mode::Review => (false, false),
+                            Mode::Browse | Mode::Review | Mode::Execute => (false, false),
                         };
                         Row { c, md: market.get(&c.symbol), held, dnt, selected, selectable }
                     })
@@ -383,7 +385,7 @@ fn sector_table(ui: &mut egui::Ui, sector: &str, rows: &[Row], sort: SortState, 
     let select_label = match mode {
         Mode::Create => Some("Basket"),
         Mode::Rebalance => Some("Discard"),
-        Mode::Browse | Mode::Review => None,
+        Mode::Browse | Mode::Review | Mode::Execute => None,
     };
     let mut table = TableBuilder::new(ui)
         .id_salt(sector)

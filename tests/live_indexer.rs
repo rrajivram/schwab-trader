@@ -44,3 +44,46 @@ async fn auto_basket_on_live_data() {
     }
     assert_eq!(picks.len(), 13);
 }
+
+/// Full order flow in PREVIEW mode: live account lookup + cash check, a
+/// sell and buys built into request bodies. Nothing is sent to Schwab.
+#[tokio::test]
+#[ignore]
+async fn preview_order_run_sends_nothing() {
+    use schwab::execution::{self, ExecEvent, OrderState, Plan, PlannedOrder};
+    use schwab::orders::Side;
+    use std::sync::{atomic::AtomicBool, Arc, Mutex};
+
+    let order = |side, symbol: &str, schwab: &str, qty, price| PlannedOrder {
+        side,
+        symbol: symbol.into(),
+        schwab_symbol: schwab.into(),
+        quantity: qty,
+        est_price: price,
+    };
+    let plan = Plan {
+        preview: true,
+        sells: vec![order(Side::Sell, "F", "F", 1.0, 12.0)],
+        buys: vec![order(Side::Buy, "BRK.B", "BRK/B", 0.0123, 480.0), order(Side::Buy, "KO", "KO", 0.05, 87.0)],
+        amount: 0.0123 * 480.0 + 0.05 * 87.0,
+        planned_proceeds: 12.0,
+        do_not_transact: Default::default(),
+    };
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = events.clone();
+    execution::run(plan, Arc::new(AtomicBool::new(false)), move |e| sink.lock().unwrap().push(e)).await;
+
+    let events = events.lock().unwrap();
+    for e in events.iter() {
+        match e {
+            ExecEvent::Sell(_, OrderState::Preview(b)) | ExecEvent::Buy(_, OrderState::Preview(b)) => println!("{b}"),
+            other => println!("{other:?}"),
+        }
+    }
+    let previews = events
+        .iter()
+        .filter(|e| matches!(e, ExecEvent::Sell(_, OrderState::Preview(_)) | ExecEvent::Buy(_, OrderState::Preview(_))))
+        .count();
+    assert_eq!(previews, 3, "one sell + two buys, all previews");
+    assert!(!events.iter().any(|e| matches!(e, ExecEvent::Sell(_, OrderState::Placed { .. }) | ExecEvent::Buy(_, OrderState::Placed { .. }))));
+}

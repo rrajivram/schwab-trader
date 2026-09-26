@@ -10,6 +10,7 @@ use schwab::{
     universe::Universe,
 };
 
+use crate::execute::Execution;
 use crate::home::SortState;
 use crate::modes::{Mode, Review};
 use crate::worker::{Msg, Worker};
@@ -73,7 +74,7 @@ impl<T> Remote<T> {
 }
 
 pub struct IndexerApp {
-    worker: Worker,
+    pub(crate) worker: Worker,
     screen: Screen,
     pub(crate) account: Remote<Account>,
     pub(crate) universe: Remote<Universe>,
@@ -95,6 +96,7 @@ pub struct IndexerApp {
     /// Rebalance mode: held symbols to sell, in the order ticked.
     pub(crate) discards: Vec<String>,
     pub(crate) review: Option<Review>,
+    pub(crate) exec: Option<Execution>,
 }
 
 impl IndexerApp {
@@ -123,6 +125,7 @@ impl IndexerApp {
             auto_size: 20,
             discards: Vec::new(),
             review: None,
+            exec: None,
         }
     }
 
@@ -232,6 +235,7 @@ impl IndexerApp {
                 self.load_market();
             }
             Msg::MarketLoaded(result) => self.market.finish(result),
+            Msg::Exec(ev) => self.handle_exec(ev),
         }
     }
 

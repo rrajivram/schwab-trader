@@ -4,6 +4,7 @@
 use eframe::egui;
 
 mod app;
+mod execute;
 mod home;
 mod modes;
 mod worker;
