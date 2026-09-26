@@ -5,6 +5,7 @@ use eframe::egui;
 
 mod app;
 mod home;
+mod modes;
 mod worker;
 
 fn main() -> eframe::Result {

@@ -4,6 +4,7 @@
 pub mod accounts;
 pub mod api;
 pub mod auth;
+pub mod basket;
 pub mod blacklist;
 pub mod config;
 pub mod dividends;

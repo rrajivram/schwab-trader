@@ -11,6 +11,7 @@ use schwab::{
 };
 
 use crate::home::SortState;
+use crate::modes::{Mode, Review};
 use crate::worker::{Msg, Worker};
 
 enum Screen {
@@ -87,6 +88,13 @@ pub struct IndexerApp {
     pub(crate) dnt_error: Option<String>,
     pub(crate) show_dnt_panel: bool,
     pub(crate) sort: HashMap<String, SortState>,
+    pub(crate) mode: Mode,
+    /// Create mode: chosen symbols, in the order added.
+    pub(crate) basket: Vec<String>,
+    pub(crate) auto_size: usize,
+    /// Rebalance mode: held symbols to sell, in the order ticked.
+    pub(crate) discards: Vec<String>,
+    pub(crate) review: Option<Review>,
 }
 
 impl IndexerApp {
@@ -110,6 +118,11 @@ impl IndexerApp {
             dnt_error,
             show_dnt_panel: false,
             sort: HashMap::new(),
+            mode: Mode::Browse,
+            basket: Vec::new(),
+            auto_size: 20,
+            discards: Vec::new(),
+            review: None,
         }
     }
 
@@ -151,6 +164,10 @@ impl IndexerApp {
 
     pub(crate) fn set_dnt(&mut self, symbol: &str, on: bool) {
         let changed = if on { self.dnt.insert(symbol.to_string()) } else { self.dnt.remove(symbol) };
+        if on {
+            self.basket.retain(|s| s != symbol);
+            self.discards.retain(|s| s != symbol);
+        }
         if changed {
             let list: Vec<String> = self.dnt.iter().cloned().collect();
             self.dnt_error = blacklist::save(&list).err().map(|e| format!("Could not save list: {e}"));

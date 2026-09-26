@@ -8,6 +8,7 @@ use egui_extras::{Column, TableBuilder};
 use schwab::{api::MarketData, portfolio::Held, universe::Constituent};
 
 use crate::app::{group_thousands, money, IndexerApp};
+use crate::modes::{Mode, DISCARD_HINT};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Col {
@@ -62,6 +63,9 @@ struct Row<'a> {
     md: Option<&'a MarketData>,
     held: Option<&'a Held>,
     dnt: bool,
+    /// Ticked in the mode's selection column (Basket / Discard).
+    selected: bool,
+    selectable: bool,
 }
 
 impl Row<'_> {
@@ -143,14 +147,24 @@ fn row_tint(ui: &egui::Ui, held: Option<&Held>) -> Option<Color32> {
 
 enum Action {
     SetDnt(String, bool),
+    Select(String, bool),
     Sort(String, Col),
 }
 
 impl IndexerApp {
     pub(crate) fn home_ui(&mut self, ui: &mut egui::Ui) {
         self.top_bar(ui);
+        if self.mode == Mode::Review {
+            self.review_ui(ui);
+            return;
+        }
         if self.show_dnt_panel {
             self.dnt_panel(ui);
+        }
+        match self.mode {
+            Mode::Create => self.create_panel(ui),
+            Mode::Rebalance => self.rebalance_panel(ui),
+            Mode::Browse | Mode::Review => {}
         }
         egui::CentralPanel::default().show(ui, |ui| self.sectors_ui(ui));
     }
@@ -202,10 +216,18 @@ impl IndexerApp {
                     }
                     ui.toggle_value(&mut self.show_dnt_panel, format!("Do not transact ({})", self.dnt.len()));
                     ui.separator();
-                    ui.add_enabled(false, egui::Button::new("Rebalance"))
-                        .on_disabled_hover_text("Coming in a later phase");
-                    ui.add_enabled(false, egui::Button::new("Create"))
-                        .on_disabled_hover_text("Coming in a later phase");
+                    let ready = self.universe.value.is_some();
+                    for (mode, label, hover) in [
+                        (Mode::Rebalance, "Rebalance", "Replace losing holdings"),
+                        (Mode::Create, "Create", "Build a new basket"),
+                    ] {
+                        let active = self.mode == mode
+                            || (self.mode == Mode::Review && self.review.as_ref().is_some_and(|r| r.rebalance == (mode == Mode::Rebalance)));
+                        let resp = ui.add_enabled(ready, egui::Button::selectable(active, label)).on_hover_text(hover);
+                        if resp.clicked() {
+                            self.mode = if active { Mode::Browse } else { mode };
+                        }
+                    }
                 });
             });
 
@@ -303,11 +325,18 @@ impl IndexerApp {
                     .constituents
                     .iter()
                     .filter(|c| c.sector == sector)
-                    .map(|c| Row {
-                        c,
-                        md: market.get(&c.symbol),
-                        held: self.held.get(&c.symbol),
-                        dnt: self.dnt.contains(&c.symbol),
+                    .map(|c| {
+                        let held = self.held.get(&c.symbol);
+                        let dnt = self.dnt.contains(&c.symbol);
+                        let (selected, selectable) = match self.mode {
+                            Mode::Create => (self.basket.contains(&c.symbol), !dnt),
+                            Mode::Rebalance => (
+                                self.discards.contains(&c.symbol),
+                                !dnt && held.is_some_and(Held::is_losing),
+                            ),
+                            Mode::Browse | Mode::Review => (false, false),
+                        };
+                        Row { c, md: market.get(&c.symbol), held, dnt, selected, selectable }
                     })
                     .collect();
                 let sort = self.sort.get(&sector).copied().unwrap_or_default();
@@ -321,13 +350,20 @@ impl IndexerApp {
 
                 egui::CollapsingHeader::new(RichText::new(title).strong())
                     .id_salt(&sector)
-                    .show(ui, |ui| sector_table(ui, &sector, &rows, sort, &mut actions));
+                    .show(ui, |ui| sector_table(ui, &sector, &rows, sort, self.mode, &mut actions));
             }
         });
 
         for action in actions {
             match action {
                 Action::SetDnt(sym, on) => self.set_dnt(&sym, on),
+                Action::Select(sym, on) => {
+                    let list = if self.mode == Mode::Rebalance { &mut self.discards } else { &mut self.basket };
+                    list.retain(|s| *s != sym);
+                    if on {
+                        list.push(sym);
+                    }
+                }
                 Action::Sort(sector, col) => {
                     let s = self.sort.entry(sector).or_default();
                     if s.col == col {
@@ -342,14 +378,22 @@ impl IndexerApp {
     }
 }
 
-fn sector_table(ui: &mut egui::Ui, sector: &str, rows: &[Row], sort: SortState, actions: &mut Vec<Action>) {
+fn sector_table(ui: &mut egui::Ui, sector: &str, rows: &[Row], sort: SortState, mode: Mode, actions: &mut Vec<Action>) {
+    let select_label = match mode {
+        Mode::Create => Some("Basket"),
+        Mode::Rebalance => Some("Discard"),
+        Mode::Browse | Mode::Review => None,
+    };
     let mut table = TableBuilder::new(ui)
         .id_salt(sector)
         .striped(true)
         .vscroll(false)
         .resizable(true)
-        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-        .column(Column::exact(28.0));
+        .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
+    if select_label.is_some() {
+        table = table.column(Column::exact(52.0));
+    }
+    table = table.column(Column::exact(28.0));
     for (col, _, _) in COLUMNS {
         table = table.column(match col {
             Col::Name => Column::initial(200.0).clip(true),
@@ -360,6 +404,11 @@ fn sector_table(ui: &mut egui::Ui, sector: &str, rows: &[Row], sort: SortState, 
 
     table
         .header(22.0, |mut header| {
+            if let Some(label) = select_label {
+                header.col(|ui| {
+                    ui.strong(label);
+                });
+            }
             header.col(|ui| {
                 ui.label("DNT").on_hover_text("Do not transact");
             });
@@ -383,6 +432,21 @@ fn sector_table(ui: &mut egui::Ui, sector: &str, rows: &[Row], sort: SortState, 
         .body(|mut body| {
             for r in rows {
                 body.row(20.0, |mut row| {
+                    if select_label.is_some() {
+                        row.col(|ui| {
+                            paint_tint(ui, r.held);
+                            let mut on = r.selected;
+                            let resp = ui.add_enabled(r.selectable, egui::Checkbox::without_text(&mut on));
+                            let resp = if mode == Mode::Rebalance {
+                                resp.on_disabled_hover_text(DISCARD_HINT)
+                            } else {
+                                resp.on_disabled_hover_text("On the do-not-transact list")
+                            };
+                            if resp.changed() {
+                                actions.push(Action::Select(r.c.symbol.clone(), on));
+                            }
+                        });
+                    }
                     row.col(|ui| {
                         paint_tint(ui, r.held);
                         let mut on = r.dnt;
