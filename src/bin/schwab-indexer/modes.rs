@@ -1,9 +1,11 @@
 //! Create / Rebalance side panels and the final Review screen.
 
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
+use schwab::api::MarketData;
 use schwab::basket::{self, Pick};
 
 use crate::app::{money, ticker_and_name, ticker_with_name, IndexerApp};
@@ -27,7 +29,14 @@ pub struct Review {
     pub sells: Vec<(String, f64)>,
     pub add_input: String,
     pub message: Option<String>,
+    /// (index into `REVIEW_COLUMNS`, ascending); None keeps the pick order.
+    pub sort: Option<(usize, bool)>,
 }
+
+/// Review table headers; all but the trailing remove-button column sort.
+const REVIEW_COLUMNS: [&str; 10] = ["Symbol", "Company", "Sector", "Div Yld", "Price", "Weight", "Share", "Amount", "Shares", ""];
+/// Columns 0..TEXT_COLUMNS sort alphabetically, the rest numerically.
+const TEXT_COLUMNS: usize = 3;
 
 pub struct Line {
     pub symbol: String,
@@ -208,6 +217,7 @@ impl IndexerApp {
             sells,
             add_input: String::new(),
             message: None,
+            sort: None,
         });
         self.mode = Mode::Review;
     }
@@ -254,11 +264,21 @@ impl IndexerApp {
             });
             ui.add_space(6.0);
 
+            // Re-sort each frame so edits and additions land in place, but not
+            // mid-edit — rows jumping under the cursor while dragging a weight
+            // would be unusable.
+            let editing = ui.ctx().egui_is_using_pointer() || ui.ctx().memory(|m| m.focused().is_some());
+            if let (Some(sort), false) = (review.sort, editing) {
+                sort_lines(&mut review.lines, &market, sort);
+            }
+
             let weights: Vec<f64> = review.lines.iter().map(|l| l.weight_pct).collect();
             let prices: Vec<Option<f64>> = review.lines.iter().map(|l| market.get(&l.symbol).and_then(|m| m.price)).collect();
             let alloc = basket::allocate(review.amount, &weights, &prices);
             let shares = basket::normalized(&weights);
             let mut remove = None;
+            let mut clicked_col = None;
+            let sort = review.sort;
 
             egui::ScrollArea::vertical().max_height(ui.available_height() - 90.0).show(ui, |ui| {
                 TableBuilder::new(ui)
@@ -272,9 +292,20 @@ impl IndexerApp {
                     .columns(Column::initial(84.0), 6)
                     .column(Column::exact(28.0))
                     .header(22.0, |mut h| {
-                        for label in ["Symbol", "Company", "Sector", "Div Yld", "Price", "Weight", "Share", "Amount", "Shares", ""] {
+                        for (i, label) in REVIEW_COLUMNS.iter().enumerate() {
                             h.col(|ui| {
-                                ui.strong(label);
+                                if label.is_empty() {
+                                    return;
+                                }
+                                let arrow = match sort {
+                                    Some((c, true)) if c == i => " ▲",
+                                    Some((c, false)) if c == i => " ▼",
+                                    _ => "",
+                                };
+                                let text = egui::RichText::new(format!("{label}{arrow}")).strong();
+                                if ui.add(egui::Button::new(text).frame(false)).clicked() {
+                                    clicked_col = Some(i);
+                                }
                             });
                         }
                     })
@@ -353,6 +384,13 @@ impl IndexerApp {
             if let Some(i) = remove {
                 review.lines.remove(i);
             }
+            if let Some(col) = clicked_col {
+                review.sort = Some(match review.sort {
+                    Some((c, asc)) if c == col => (col, !asc),
+                    // Text sorts A→Z first; numbers biggest first.
+                    _ => (col, col < TEXT_COLUMNS),
+                });
+            }
         });
 
         if let Some(sym) = add {
@@ -385,6 +423,38 @@ impl IndexerApp {
         review.lines.push(Line { symbol, sector, index_weight, weight_pct });
         Ok(())
     }
+}
+
+fn sort_lines(lines: &mut [Line], market: &HashMap<String, MarketData>, (col, ascending): (usize, bool)) {
+    let name = |l: &Line| market.get(&l.symbol).and_then(|m| m.description.clone()).unwrap_or_default();
+    let price = |l: &Line| market.get(&l.symbol).and_then(|m| m.price);
+    // Share and Amount are proportional to Weight, and Shares to Weight/Price,
+    // so no need to compute the allocation to order by them.
+    let num = |l: &Line| -> Option<f64> {
+        match REVIEW_COLUMNS[col] {
+            "Div Yld" => market.get(&l.symbol).and_then(|m| m.div_yield),
+            "Price" => price(l),
+            "Weight" | "Share" | "Amount" => Some(l.weight_pct),
+            "Shares" => price(l).filter(|p| *p > 0.0).map(|p| l.weight_pct / p),
+            _ => None,
+        }
+    };
+    let dir = |o: Ordering| if ascending { o } else { o.reverse() };
+    lines.sort_by(|a, b| {
+        match REVIEW_COLUMNS[col] {
+            "Symbol" => dir(a.symbol.cmp(&b.symbol)),
+            "Company" => dir(name(a).cmp(&name(b))),
+            "Sector" => dir(a.sector.cmp(&b.sector)),
+            _ => match (num(a), num(b)) {
+                (Some(x), Some(y)) => dir(x.total_cmp(&y)),
+                // Missing values last in either direction.
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => Ordering::Equal,
+            },
+        }
+        .then_with(|| a.symbol.cmp(&b.symbol))
+    });
 }
 
 fn reset_weights(lines: &mut [Line]) {
