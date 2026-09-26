@@ -15,6 +15,7 @@ use schwab::{
 };
 
 use crate::app::{money, IndexerApp};
+use crate::theme::{self, pal, Tone};
 use crate::home::fmt_qty;
 use crate::modes::{Mode, Review};
 
@@ -65,50 +66,64 @@ impl IndexerApp {
         let mut confirmed = false;
         let mut cancel = false;
 
+        let p = pal(ui);
         let resp = egui::Modal::new(egui::Id::new("confirm_orders")).show(ui.ctx(), |ui| {
-            ui.set_width(560.0);
-            ui.heading("Confirm orders");
-            ui.label("Market orders, good for the day. If the market is closed they execute at the next open.");
-            ui.add_space(6.0);
+            ui.set_width(600.0);
+            ui.label(RichText::new("Confirm orders").font(theme::sans_semibold(theme::HEADING)));
+            ui.label(RichText::new("Market orders, good for today. If the market is closed they execute at the next open.").color(p.muted));
+            ui.add_space(10.0);
 
-            egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-                egui::Grid::new("confirm_grid").striped(true).num_columns(5).spacing([14.0, 4.0]).show(ui, |ui| {
-                    for (label, list) in [("SELL", &sells), ("BUY", &buys)] {
-                        for o in list.iter() {
-                            ui.strong(label);
-                            ui.monospace(&o.symbol);
-                            let name = market.get(&o.symbol).and_then(|m| m.description.as_deref()).unwrap_or("");
-                            ui.add(egui::Label::new(RichText::new(name).weak()).truncate());
-                            ui.label(format!("{} sh", fmt_qty(o.quantity)));
-                            ui.label(format!("≈ {}", money(o.est_value())));
-                            ui.end_row();
+            theme::card(ui).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+                egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
+                    egui::Grid::new("confirm_grid").striped(true).num_columns(5).spacing([14.0, 6.0]).min_col_width(0.0).show(ui, |ui| {
+                        for (side, list) in [(Side::Sell, &sells), (Side::Buy, &buys)] {
+                            for o in list.iter() {
+                                side_pill(ui, side);
+                                ui.label(RichText::new(&o.symbol).font(theme::mono_semibold(theme::BODY)));
+                                let name = market.get(&o.symbol).and_then(|m| m.description.as_deref()).unwrap_or("");
+                                ui.add(egui::Label::new(RichText::new(name).color(p.muted)).truncate());
+                                ui.label(RichText::new(format!("{} sh", fmt_qty(o.quantity))).font(theme::mono(12.5)));
+                                ui.label(RichText::new(format!("≈ {}", money(o.est_value()))).font(theme::mono(12.5)));
+                                ui.end_row();
+                            }
                         }
-                    }
+                    });
                 });
             });
-            ui.separator();
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 30.0;
+                if !sells.is_empty() {
+                    theme::stat(ui, &format!("Sell · {} positions", sells.len()), &money(sell_total), Some(p.loss));
+                }
+                theme::stat(ui, &format!("Buy · {} stocks", buys.len()), &money(buy_total), None);
+            });
             if !sells.is_empty() {
-                ui.label(format!("Sell {} positions ≈ {}", sells.len(), money(sell_total)));
-                ui.label("Buys are placed after the sells fill. If the sells raise less than planned, buys are scaled down.");
-                ui.label("Keep the app open until the buys have been placed.");
+                ui.add_space(6.0);
+                ui.label(RichText::new(
+                    "Buys go out after the sells fill, scaled down if the sells raise less than planned. \
+                     Keep the app open until the buys have been placed.",
+                ).color(p.muted));
             }
-            ui.strong(format!("Buy {} stocks ≈ {}", buys.len(), money(buy_total)));
             if !skipped.is_empty() {
-                ui.colored_label(ui.visuals().warn_fg_color, format!("Skipped (no price or zero shares): {}", skipped.join(", ")));
+                ui.label(RichText::new(format!("Skipped, no price or zero shares: {}", skipped.join(", "))).color(p.warn));
             }
-            ui.add_space(8.0);
-            ui.checkbox(&mut preview, "Preview only — build the orders but don't send them to Schwab");
-            ui.add_space(8.0);
+            ui.add_space(10.0);
+            ui.checkbox(&mut preview, "Preview only: build the orders but don't send them to Schwab");
+            ui.add_space(12.0);
             ui.horizontal(|ui| {
                 cancel = ui.button("Cancel").clicked();
-                let label = if preview {
-                    format!("Preview {n_orders} orders")
-                } else {
-                    format!("Send {n_orders} orders to Schwab")
-                };
-                let button = egui::Button::new(RichText::new(label).strong());
-                let button = if preview { button } else { button.fill(ui.visuals().error_fg_color.gamma_multiply(0.35)) };
-                confirmed = ui.add_enabled(n_orders > 0, button).clicked();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (label, fill) = if preview {
+                        (format!("Preview {n_orders} orders"), p.accent)
+                    } else {
+                        (format!("Send {n_orders} orders to Schwab"), p.loss)
+                    };
+                    let button = egui::Button::new(RichText::new(label).font(theme::sans_semibold(theme::BODY)).color(p.on_accent))
+                        .fill(fill)
+                        .min_size(egui::Vec2::new(0.0, 32.0));
+                    confirmed = ui.add_enabled(n_orders > 0, button).clicked();
+                });
             });
         });
 
@@ -174,99 +189,121 @@ impl IndexerApp {
             self.mode = Mode::Browse;
             return;
         };
+        let p = pal(ui);
         let market = self.market.value.as_ref();
         let mut done = false;
 
-        egui::CentralPanel::default().show(ui, |ui| {
+        let frame = egui::Frame::new().fill(p.bg).inner_margin(egui::Margin::symmetric(22, 16));
+        egui::CentralPanel::default().frame(frame).show(ui, |ui| {
+            let rows: Vec<&(PlannedOrder, OrderState)> = exec.sells.iter().chain(&exec.buys).collect();
+            let count = |f: &dyn Fn(&OrderState) -> bool| rows.iter().filter(|(_, s)| f(s)).count();
+            let filled = count(&|s| matches!(s, OrderState::Placed { status: Some(st), .. } if st.status == "FILLED"));
+            let failed = count(&|s| status_tone(s).1 == ToneKind::Bad);
+            let working = count(&|s| matches!(s, OrderState::Placed { status, .. } if !status.as_ref().is_some_and(|st| st.is_terminal())));
+
             ui.horizontal(|ui| {
+                let title = if exec.preview { "Order preview" } else { "Placing orders" };
+                ui.label(RichText::new(title).font(theme::sans_semibold(theme::HEADING)));
                 if exec.preview {
-                    ui.heading("Order preview — nothing was sent");
-                } else {
-                    ui.heading("Placing orders");
+                    theme::tone_pill(ui, "Nothing was sent", Tone::Neutral);
                 }
                 if exec.running {
                     ui.spinner();
                 }
-            });
-            for n in &exec.notes {
-                ui.label(n);
-            }
-            ui.add_space(6.0);
-
-            let rows: Vec<&(PlannedOrder, OrderState)> = exec.sells.iter().chain(&exec.buys).collect();
-            egui::ScrollArea::vertical().max_height(ui.available_height() - 60.0).show(ui, |ui| {
-                TableBuilder::new(ui)
-                    .id_salt("exec_table")
-                    .striped(true)
-                    .vscroll(false)
-                    .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                    .column(Column::exact(44.0))
-                    .column(Column::exact(64.0))
-                    .column(Column::initial(200.0).clip(true))
-                    .columns(Column::initial(90.0), 5)
-                    .column(Column::remainder().clip(true))
-                    .header(22.0, |mut h| {
-                        for label in ["Side", "Symbol", "Company", "Shares", "Est. value", "Status", "Filled", "Avg price", "Detail"] {
-                            h.col(|ui| {
-                                ui.strong(label);
-                            });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if exec.running {
+                        let label = if exec.buys.iter().any(|(_, s)| !matches!(s, OrderState::Pending)) {
+                            "Stop tracking"
+                        } else {
+                            "Stop waiting (don't place buys)"
+                        };
+                        if ui.button(label).clicked() {
+                            exec.cancel.store(true, Ordering::Relaxed);
                         }
-                    })
-                    .body(|mut body| {
-                        for (o, state) in &rows {
-                            body.row(22.0, |mut row| {
-                                row.col(|ui| {
-                                    ui.strong(o.side.instruction());
-                                });
-                                row.col(|ui| {
-                                    ui.monospace(&o.symbol);
-                                });
-                                row.col(|ui| {
-                                    let name = market.and_then(|m| m.get(&o.symbol)?.description.as_deref()).unwrap_or("");
-                                    ui.label(name).on_hover_text(name);
-                                });
-                                row.col(|ui| {
-                                    ui.label(fmt_qty(o.quantity));
-                                });
-                                row.col(|ui| {
-                                    ui.label(money(o.est_value()));
-                                });
-                                status_cells(&mut row, state);
-                            });
-                        }
-                    });
-
-                if exec.preview {
-                    ui.add_space(8.0);
-                    egui::CollapsingHeader::new("Request bodies that would be sent").show(ui, |ui| {
-                        for (o, state) in &rows {
-                            if let OrderState::Preview(body) = state {
-                                ui.monospace(format!("{} {}", o.side.instruction(), o.symbol));
-                                ui.code(serde_json::to_string_pretty(body).unwrap_or_default());
-                            }
-                        }
-                    });
-                }
-            });
-
-            ui.separator();
-            ui.horizontal(|ui| {
-                if exec.running {
-                    let label = if exec.buys.iter().any(|(_, s)| !matches!(s, OrderState::Pending)) {
-                        "Stop tracking"
                     } else {
-                        "Stop waiting (don't place buys)"
-                    };
-                    if ui.button(label).clicked() {
-                        exec.cancel.store(true, Ordering::Relaxed);
+                        done = ui.add(theme::primary(ui, "Done").min_size(egui::Vec2::new(100.0, 32.0))).clicked();
                     }
-                } else {
-                    done = ui.button("Done").clicked();
-                }
-                if !exec.preview {
-                    ui.weak("Every order and its result is logged to order-log.jsonl.");
-                }
+                });
             });
+            ui.add_space(10.0);
+
+            if !exec.preview {
+                theme::card(ui).inner_margin(egui::Margin::symmetric(18, 12)).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 34.0;
+                        theme::stat(ui, "Orders", &rows.len().to_string(), None);
+                        theme::stat(ui, "Filled", &filled.to_string(), Some(p.gain));
+                        theme::stat(ui, "Working", &working.to_string(), Some(p.warn));
+                        theme::stat(ui, "Failed", &failed.to_string(), Some(if failed > 0 { p.loss } else { p.muted }));
+                    });
+                });
+                ui.add_space(8.0);
+            }
+            for n in &exec.notes {
+                ui.label(RichText::new(n).color(p.ink));
+            }
+            ui.add_space(4.0);
+
+            theme::card(ui).inner_margin(egui::Margin::symmetric(14, 8)).show(ui, |ui| {
+                egui::ScrollArea::both().max_height(ui.available_height() - 40.0).auto_shrink([false, true]).show(ui, |ui| {
+                    TableBuilder::new(ui)
+                        .id_salt("exec_table")
+                        .striped(true)
+                        .vscroll(false)
+                        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                        .column(Column::exact(58.0))
+                        .column(Column::exact(70.0))
+                        .column(Column::initial(210.0).clip(true))
+                        .columns(Column::initial(96.0), 5)
+                        .column(Column::remainder().at_least(160.0).clip(true))
+                        .header(26.0, |mut h| {
+                            for label in ["Side", "Ticker", "Company", "Shares", "Est. value", "Status", "Filled", "Avg price", "Detail"] {
+                                h.col(|ui| {
+                                    ui.label(theme::eyebrow(ui, label));
+                                });
+                            }
+                        })
+                        .body(|mut body| {
+                            for (o, state) in &rows {
+                                body.row(28.0, |mut row| {
+                                    row.col(|ui| {
+                                        side_pill(ui, o.side);
+                                    });
+                                    row.col(|ui| {
+                                        ui.label(RichText::new(&o.symbol).font(theme::mono_semibold(13.0)));
+                                    });
+                                    row.col(|ui| {
+                                        let name = market.and_then(|m| m.get(&o.symbol)?.description.as_deref()).unwrap_or("");
+                                        ui.label(name).on_hover_text(name);
+                                    });
+                                    row.col(|ui| {
+                                        ui.label(RichText::new(fmt_qty(o.quantity)).font(theme::mono(12.5)));
+                                    });
+                                    row.col(|ui| {
+                                        ui.label(RichText::new(money(o.est_value())).font(theme::mono(12.5)));
+                                    });
+                                    status_cells(&mut row, state);
+                                });
+                            }
+                        });
+
+                    if exec.preview {
+                        ui.add_space(10.0);
+                        egui::CollapsingHeader::new(RichText::new("Show the request bodies that would be sent").color(p.accent)).show(ui, |ui| {
+                            for (o, state) in &rows {
+                                if let OrderState::Preview(body) = state {
+                                    ui.label(RichText::new(format!("{} {}", o.side.instruction(), o.symbol)).font(theme::mono_semibold(12.5)));
+                                    ui.code(serde_json::to_string_pretty(body).unwrap_or_default());
+                                }
+                            }
+                        });
+                    }
+                });
+            });
+            if !exec.preview {
+                ui.add_space(6.0);
+                ui.label(RichText::new("Every order and its result is saved to order-log.jsonl.").color(p.muted).font(theme::sans(theme::SMALL)));
+            }
         });
 
         if done {
@@ -281,35 +318,74 @@ impl IndexerApp {
     }
 }
 
+#[derive(PartialEq)]
+enum ToneKind {
+    Good,
+    Bad,
+    Busy,
+    Idle,
+}
+
+fn status_tone(state: &OrderState) -> (String, ToneKind) {
+    match state {
+        OrderState::Pending => ("Waiting".into(), ToneKind::Idle),
+        OrderState::Preview(_) => ("Preview".into(), ToneKind::Idle),
+        OrderState::Placed { status: None, .. } => ("Sent".into(), ToneKind::Busy),
+        OrderState::Placed { status: Some(st), .. } => {
+            let kind = match st.status.as_str() {
+                "FILLED" => ToneKind::Good,
+                "REJECTED" | "CANCELED" | "EXPIRED" => ToneKind::Bad,
+                _ => ToneKind::Busy,
+            };
+            (title_case(&st.status), kind)
+        }
+        OrderState::Failed(_) => ("Failed".into(), ToneKind::Bad),
+    }
+}
+
+/// "PENDING_ACTIVATION" → "Pending activation".
+fn title_case(status: &str) -> String {
+    let lower = status.replace('_', " ").to_lowercase();
+    let mut c = lower.chars();
+    c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+}
+
+fn side_pill(ui: &mut egui::Ui, side: Side) {
+    match side {
+        Side::Buy => theme::tone_pill(ui, "BUY", Tone::Gain),
+        Side::Sell => theme::tone_pill(ui, "SELL", Tone::Loss),
+    };
+}
+
 fn status_cells(row: &mut egui_extras::TableRow<'_, '_>, state: &OrderState) {
-    let (status, filled, avg, detail): (String, String, String, String) = match state {
-        OrderState::Pending => ("Waiting".into(), String::new(), String::new(), String::new()),
-        OrderState::Preview(_) => ("Preview".into(), String::new(), String::new(), "not sent".into()),
-        OrderState::Placed { status: None, .. } => ("Sent".into(), String::new(), String::new(), String::new()),
+    let (label, kind) = status_tone(state);
+    let (filled, avg, detail) = match state {
         OrderState::Placed { status: Some(st), .. } => (
-            st.status.clone(),
             fmt_qty(st.filled_quantity),
             st.avg_price().map(|p| format!("{p:.4}")).unwrap_or_default(),
             st.description.clone().unwrap_or_default(),
         ),
-        OrderState::Failed(e) => ("FAILED".into(), String::new(), String::new(), e.clone()),
+        OrderState::Failed(e) => (String::new(), String::new(), e.clone()),
+        OrderState::Preview(_) => (String::new(), String::new(), "Not sent".into()),
+        _ => (String::new(), String::new(), String::new()),
     };
-    let failed = matches!(state, OrderState::Failed(_))
-        || matches!(state, OrderState::Placed { status: Some(st), .. } if matches!(st.status.as_str(), "REJECTED" | "CANCELED" | "EXPIRED"));
     row.col(|ui| {
-        if failed {
-            ui.colored_label(ui.visuals().error_fg_color, &status);
-        } else {
-            ui.label(&status);
-        }
+        let tone = match kind {
+            ToneKind::Good => Tone::Gain,
+            ToneKind::Bad => Tone::Loss,
+            ToneKind::Busy => Tone::Warn,
+            ToneKind::Idle => Tone::Neutral,
+        };
+        theme::tone_pill(ui, &label, tone);
     });
     row.col(|ui| {
-        ui.label(&filled);
+        ui.label(RichText::new(filled).font(theme::mono(12.5)));
     });
     row.col(|ui| {
-        ui.label(&avg);
+        ui.label(RichText::new(avg).font(theme::mono(12.5)));
     });
     row.col(|ui| {
-        ui.label(&detail).on_hover_text(&detail);
+        let color = if kind == ToneKind::Bad { pal(ui).loss } else { pal(ui).muted };
+        ui.label(RichText::new(&detail).color(color)).on_hover_text(&detail);
     });
 }

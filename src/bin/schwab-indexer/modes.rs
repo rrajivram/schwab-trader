@@ -3,14 +3,15 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
-use eframe::egui;
+use eframe::egui::{self, RichText};
 use egui_extras::{Column, TableBuilder};
 use schwab::api::MarketData;
 use schwab::basket::{self, Pick};
 use schwab::execution::PlannedOrder;
 use schwab::orders::Side;
 
-use crate::app::{money, ticker_and_name, ticker_with_name, IndexerApp};
+use crate::app::{money, IndexerApp};
+use crate::theme::{self, pal, Tone};
 use crate::home::fmt_qty;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -106,59 +107,73 @@ impl IndexerApp {
         basket::replacements(u, &self.eps_scores(), &self.auto_exclusions(), &sectors)
     }
 
+    fn side_frame(ui: &egui::Ui) -> egui::Frame {
+        let p = pal(ui);
+        egui::Frame::new().fill(p.surface).stroke(egui::Stroke::new(1.0, p.border)).inner_margin(egui::Margin::same(16))
+    }
+
     pub(crate) fn create_panel(&mut self, ui: &mut egui::Ui) {
+        let p = pal(ui);
         let mut remove = None;
         let mut auto = false;
         let mut review = false;
         let names = self.names(&self.basket);
         let pe_passing = self.universe.value.as_ref().map_or(0, |u| u.constituents.len()) - self.pe_exclusions().len();
-        egui::Panel::right("create_panel").default_size(260.0).show(ui, |ui| {
-            ui.heading("Create basket");
-            ui.label("Tick “Basket” on any row, or fill automatically.");
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.label("Auto size");
+        egui::Panel::right("create_panel").frame(Self::side_frame(ui)).default_size(300.0).show(ui, |ui| {
+            ui.label(RichText::new("New basket").font(theme::sans_semibold(theme::TITLE)));
+            ui.label(RichText::new("Add stocks from the list, or let Auto fill choose them.").color(p.muted));
+            ui.add_space(10.0);
+
+            ui.label(theme::eyebrow(ui, "Auto fill"));
+            egui::Grid::new("auto_grid").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+                ui.label("Basket size");
                 ui.add(egui::DragValue::new(&mut self.auto_size).range(1..=500).suffix(" stocks"));
-            });
-            ui.horizontal(|ui| {
+                ui.end_row();
                 ui.checkbox(&mut self.max_pe_enabled, "Max P/E")
                     .on_hover_text("Only pick stocks with a positive P/E at or below this. Stocks with no P/E (e.g. losses) are skipped.");
                 ui.add_enabled(self.max_pe_enabled, egui::DragValue::new(&mut self.max_pe).range(1.0..=500.0).speed(0.5).max_decimals(1));
+                ui.end_row();
             });
             if self.max_pe_enabled {
-                ui.weak(format!("{pe_passing} S&P 500 stocks pass (before other exclusions)"));
+                ui.label(RichText::new(format!("{pe_passing} of the S&P 500 pass this limit")).color(p.muted).font(theme::sans(theme::SMALL)));
             }
             let ready = self.market.value.is_some();
             auto = ui
-                .add_enabled(ready, egui::Button::new("Auto fill"))
+                .add_enabled_ui(ready, |ui| ui.add_sized([ui.available_width(), 32.0], theme::primary(ui, "Auto fill")))
+                .inner
                 .on_hover_text(
-                    "Skips do-not-transact and stocks you hold, then takes the highest EPS \
-                     from each sector (heaviest sector first), then the 2nd highest, …",
+                    "Skips blocked stocks and ones you hold, then takes the highest-EPS stock \
+                     from each sector (heaviest sector first), then the 2nd highest, and so on.",
                 )
                 .on_disabled_hover_text("Waiting for quotes")
                 .clicked();
             if let Some(note) = &self.auto_note {
-                ui.colored_label(ui.visuals().warn_fg_color, note);
+                ui.label(RichText::new(note).color(p.warn));
             }
+
+            ui.add_space(8.0);
             ui.separator();
             ui.horizontal(|ui| {
-                ui.strong(format!("Basket ({})", self.basket.len()));
-                if !self.basket.is_empty() && ui.small_button("Clear").clicked() {
-                    self.basket.clear();
-                }
+                ui.label(theme::eyebrow(ui, &format!("Basket · {}", self.basket.len())));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if !self.basket.is_empty() && ui.small_button("Clear all").clicked() {
+                        self.basket.clear();
+                    }
+                });
             });
-            egui::ScrollArea::vertical().max_height(ui.available_height() - 40.0).show(ui, |ui| {
+            egui::ScrollArea::vertical().max_height(ui.available_height() - 48.0).show(ui, |ui| {
+                if self.basket.is_empty() {
+                    ui.label(RichText::new("Empty. Click Add on any row, or use Auto fill.").color(p.muted));
+                }
                 for sym in &self.basket {
-                    ui.horizontal(|ui| {
-                        if ui.small_button("✕").clicked() {
-                            remove = Some(sym.clone());
-                        }
-                        ticker_with_name(ui, sym, &names[sym]);
-                    });
+                    list_row(ui, sym, &names[sym], None, || remove = Some(sym.clone()));
                 }
             });
             ui.separator();
-            review = ui.add_enabled(!self.basket.is_empty(), egui::Button::new("Review →")).clicked();
+            review = ui
+                .add_enabled_ui(!self.basket.is_empty(), |ui| ui.add_sized([ui.available_width(), 32.0], theme::primary(ui, "Review basket →")))
+                .inner
+                .clicked();
         });
 
         if let Some(sym) = remove {
@@ -170,7 +185,7 @@ impl IndexerApp {
                 exclude.extend(self.pe_exclusions());
                 let picks = basket::auto_basket(u, &self.eps_scores(), &exclude, self.auto_size);
                 self.auto_note = (picks.len() < self.auto_size)
-                    .then(|| format!("Only {} stocks qualify — basket has {}.", picks.len(), picks.len()));
+                    .then(|| format!("Only {} stocks qualify, so the basket has {}.", picks.len(), picks.len()));
                 self.basket = picks.into_iter().map(|p| p.symbol).collect();
             }
         }
@@ -180,43 +195,47 @@ impl IndexerApp {
     }
 
     pub(crate) fn rebalance_panel(&mut self, ui: &mut egui::Ui) {
+        let p = pal(ui);
         let mut remove = None;
         let mut review = false;
         let replacements = self.current_replacements();
         let names = self.names(self.discards.iter().chain(replacements.iter().map(|p| &p.symbol)));
-        egui::Panel::right("rebalance_panel").default_size(300.0).show(ui, |ui| {
-            ui.heading("Rebalance");
-            ui.label("Tick “Discard” on held stocks that are below purchase price (red rows).");
-            ui.add_space(6.0);
-            ui.strong(format!("Discard ({}) · {}", self.discards.len(), money(self.discard_value())));
-            for sym in &self.discards {
-                ui.horizontal(|ui| {
-                    if ui.small_button("✕").clicked() {
-                        remove = Some(sym.clone());
-                    }
-                    if let Some(h) = self.held.get(sym) {
-                        ui.label(money(h.market_value));
-                    }
-                    ticker_with_name(ui, sym, &names[sym]);
-                });
+        egui::Panel::right("rebalance_panel").frame(Self::side_frame(ui)).default_size(320.0).show(ui, |ui| {
+            ui.label(RichText::new("Rebalance").font(theme::sans_semibold(theme::TITLE)));
+            ui.label(RichText::new("Click Discard on holdings that are below cost (red stripe). Each is sold and replaced.").color(p.muted));
+            ui.add_space(10.0);
+
+            ui.label(theme::eyebrow(ui, &format!("Selling · {} · {}", self.discards.len(), money(self.discard_value()))));
+            if self.discards.is_empty() {
+                ui.label(RichText::new("Nothing to sell yet.").color(p.muted));
             }
+            for sym in &self.discards {
+                let value = self.held.get(sym).map(|h| money(h.market_value));
+                list_row(ui, sym, &names[sym], value.as_deref(), || remove = Some(sym.clone()));
+            }
+
+            ui.add_space(8.0);
             ui.separator();
-            ui.strong("Replacements");
-            ui.weak("Each is the highest-EPS stock in the next sector after the discard's.");
+            ui.label(theme::eyebrow(ui, "Replacements"));
+            ui.label(RichText::new("The highest-EPS stock in the next sector after each discard's.").color(p.muted).font(theme::sans(theme::SMALL)));
             if replacements.is_empty() {
-                ui.weak("—");
+                ui.label(RichText::new("—").color(p.muted));
             }
             for (discard, pick) in self.discards.iter().zip(&replacements) {
-                ui.label(format!(
-                    "{} → {}",
-                    ticker_and_name(discard, &names[discard]),
-                    ticker_and_name(&pick.symbol, &names[&pick.symbol])
-                ));
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(&pick.symbol).font(theme::mono_semibold(theme::BODY)));
+                    ui.add(egui::Label::new(RichText::new(&names[&pick.symbol]).color(p.ink)).truncate());
+                });
                 let eps = pick.score.map(|e| format!("{e:.2}")).unwrap_or("—".into());
-                ui.weak(format!("      {}, EPS {eps}", pick.sector));
+                ui.label(RichText::new(format!("replaces {discard} · {} · EPS {eps}", pick.sector)).color(p.muted).font(theme::sans(theme::SMALL)));
             }
+            ui.add_space(8.0);
             ui.separator();
-            review = ui.add_enabled(!replacements.is_empty(), egui::Button::new("Review →")).clicked();
+            review = ui
+                .add_enabled_ui(!replacements.is_empty(), |ui| ui.add_sized([ui.available_width(), 32.0], theme::primary(ui, "Review rebalance →")))
+                .inner
+                .clicked();
         });
 
         if let Some(sym) = remove {
@@ -269,45 +288,15 @@ impl IndexerApp {
             self.mode = Mode::Browse;
             return;
         };
+        let p = pal(ui);
         let market = self.market.value.clone().unwrap_or_default();
         let mut back = false;
         let mut add = None;
         let mut planned_buys = Vec::new();
         let mut skipped = Vec::new();
 
-        egui::CentralPanel::default().show(ui, |ui| {
-            ui.horizontal(|ui| {
-                back = ui.button("← Back").clicked();
-                ui.heading(if review.rebalance { "Review rebalance" } else { "Review new basket" });
-            });
-            ui.add_space(6.0);
-
-            if review.rebalance {
-                let sold: Vec<String> = review
-                    .sells
-                    .iter()
-                    .map(|(s, v)| {
-                        let name = market.get(s).and_then(|m| m.description.as_deref()).unwrap_or("");
-                        format!("{} {}", ticker_and_name(s, name), money(*v))
-                    })
-                    .collect();
-                ui.label(format!("Sell in full: {}", sold.join(", ")));
-            }
-
-            ui.horizontal(|ui| {
-                ui.label("Investment amount");
-                ui.add(
-                    egui::DragValue::new(&mut review.amount)
-                        .range(0.0..=review.cap)
-                        .speed(10.0)
-                        .prefix("$")
-                        .fixed_decimals(2),
-                );
-                let cap_note = if review.rebalance { "cash + sale proceeds" } else { "available cash" };
-                ui.weak(format!("max {} ({cap_note})", money(review.cap)));
-            });
-            ui.add_space(6.0);
-
+        let frame = egui::Frame::new().fill(p.bg).inner_margin(egui::Margin::symmetric(22, 16));
+        egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             // Re-sort each frame so edits and additions land in place, but not
             // mid-edit — rows jumping under the cursor while dragging a weight
             // would be unusable.
@@ -315,96 +304,11 @@ impl IndexerApp {
             if let (Some(sort), false) = (review.sort, editing) {
                 sort_lines(&mut review.lines, &market, sort);
             }
-
             let weights: Vec<f64> = review.lines.iter().map(|l| l.weight_pct).collect();
             let prices: Vec<Option<f64>> = review.lines.iter().map(|l| market.get(&l.symbol).and_then(|m| m.price)).collect();
             let alloc = basket::allocate(review.amount, &weights, &prices);
             let shares = basket::normalized(&weights);
-            let mut remove = None;
-            let mut clicked_col = None;
-            let sort = review.sort;
-
-            egui::ScrollArea::vertical().max_height(ui.available_height() - 90.0).show(ui, |ui| {
-                TableBuilder::new(ui)
-                    .id_salt("review_table")
-                    .striped(true)
-                    .vscroll(false)
-                    .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                    .column(Column::exact(64.0))
-                    .column(Column::initial(220.0).clip(true))
-                    .column(Column::initial(170.0))
-                    .columns(Column::initial(84.0), 6)
-                    .column(Column::exact(28.0))
-                    .header(22.0, |mut h| {
-                        for (i, label) in REVIEW_COLUMNS.iter().enumerate() {
-                            h.col(|ui| {
-                                if label.is_empty() {
-                                    return;
-                                }
-                                let arrow = match sort {
-                                    Some((c, true)) if c == i => " ▲",
-                                    Some((c, false)) if c == i => " ▼",
-                                    _ => "",
-                                };
-                                let text = egui::RichText::new(format!("{label}{arrow}")).strong();
-                                if ui.add(egui::Button::new(text).frame(false)).clicked() {
-                                    clicked_col = Some(i);
-                                }
-                            });
-                        }
-                    })
-                    .body(|mut body| {
-                        for (i, line) in review.lines.iter_mut().enumerate() {
-                            let md = market.get(&line.symbol);
-                            body.row(22.0, |mut row| {
-                                row.col(|ui| {
-                                    ui.monospace(&line.symbol);
-                                });
-                                row.col(|ui| {
-                                    let name = md.and_then(|m| m.description.as_deref()).unwrap_or("");
-                                    ui.label(name).on_hover_text(name);
-                                });
-                                row.col(|ui| {
-                                    ui.label(&line.sector);
-                                });
-                                row.col(|ui| {
-                                    ui.label(md.and_then(|m| m.div_yield).map(|y| format!("{y:.2}%")).unwrap_or("—".into()));
-                                });
-                                row.col(|ui| {
-                                    ui.label(prices[i].map(|p| format!("{p:.2}")).unwrap_or("—".into()));
-                                });
-                                row.col(|ui| {
-                                    ui.add(egui::DragValue::new(&mut line.weight_pct).range(0.0..=100.0).speed(0.1).suffix("%").max_decimals(2))
-                                        .on_hover_text("Relative weight — rescaled so the basket totals 100%");
-                                });
-                                row.col(|ui| {
-                                    ui.label(format!("{:.2}%", shares[i] * 100.0));
-                                });
-                                row.col(|ui| {
-                                    ui.label(money(alloc[i].dollars));
-                                });
-                                row.col(|ui| {
-                                    if prices[i].is_some() {
-                                        ui.label(fmt_qty(alloc[i].quantity));
-                                    } else {
-                                        ui.weak("no price");
-                                    }
-                                });
-                                row.col(|ui| {
-                                    if ui.small_button("✕").on_hover_text("Remove").clicked() {
-                                        remove = Some(i);
-                                    }
-                                });
-                            });
-                        }
-                    });
-            });
-
-            let spent: f64 = alloc
-                .iter()
-                .zip(&prices)
-                .filter_map(|(a, p)| Some(a.quantity * (*p)?))
-                .sum();
+            let spent: f64 = alloc.iter().zip(&prices).filter_map(|(a, p)| Some(a.quantity * (*p)?)).sum();
             for ((line, a), price) in review.lines.iter().zip(&alloc).zip(&prices) {
                 match price {
                     Some(p) if a.quantity > 0.0 => planned_buys.push(PlannedOrder {
@@ -417,31 +321,162 @@ impl IndexerApp {
                     _ => skipped.push(line.symbol.clone()),
                 }
             }
-            ui.separator();
+            let can_place = !planned_buys.is_empty() || (review.rebalance && !review.sells.is_empty());
+
+            // Title row.
             ui.horizontal(|ui| {
-                ui.strong(format!("{} stocks · buys total {}", review.lines.len(), money(spent)));
-                ui.weak(format!("· {} left over from rounding shares down", money(review.amount - spent)));
+                back = ui.button("← Back").clicked();
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(if review.rebalance { "Review rebalance" } else { "Review new basket" })
+                        .font(theme::sans_semibold(theme::HEADING)),
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let can_place = !planned_buys.is_empty() || (review.rebalance && !review.sells.is_empty());
-                    let place = egui::Button::new(egui::RichText::new("Place orders…").strong());
-                    if ui.add_enabled(can_place, place).clicked() {
+                    if ui.add_enabled(can_place, theme::primary(ui, "Place orders…").min_size(egui::Vec2::new(140.0, 32.0))).clicked() {
                         review.confirm = Some(true);
                     }
                 });
             });
-            ui.horizontal(|ui| {
-                let resp = ui.add(egui::TextEdit::singleline(&mut review.add_input).hint_text("Add symbol").desired_width(90.0));
-                let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if (ui.button("Add").clicked() || enter) && !review.add_input.trim().is_empty() {
-                    add = Some(review.add_input.trim().to_uppercase());
-                }
-                if ui.button("Reset to index weights").clicked() {
-                    reset_weights(&mut review.lines);
+            ui.add_space(10.0);
+
+            // Summary.
+            theme::card(ui).inner_margin(egui::Margin::symmetric(18, 14)).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 36.0;
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        ui.label(theme::eyebrow(ui, "Investment amount"));
+                        ui.add(
+                            egui::DragValue::new(&mut review.amount)
+                                .range(0.0..=review.cap)
+                                .speed(10.0)
+                                .prefix("$")
+                                .fixed_decimals(2)
+                                .custom_formatter(|v, _| money(v).trim_start_matches('$').to_string()),
+                        )
+                        .on_hover_text("Drag or click to type");
+                        let cap_note = if review.rebalance { "cash + sale proceeds" } else { "available cash" };
+                        ui.label(RichText::new(format!("max {} · {cap_note}", money(review.cap))).color(p.muted).font(theme::sans(theme::SMALL)));
+                    });
+                    theme::stat(ui, "Stocks", &review.lines.len().to_string(), None);
+                    theme::stat(ui, "Buys total", &money(spent), None);
+                    theme::stat(ui, "Left over", &money(review.amount - spent), Some(p.muted));
+                    if review.rebalance {
+                        let sold: f64 = review.sells.iter().map(|(_, v)| v).sum();
+                        theme::stat(ui, "Selling", &money(sold), Some(p.loss));
+                    }
+                });
+                if review.rebalance && !review.sells.is_empty() {
+                    ui.add_space(8.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("Sold in full first:").color(p.muted));
+                        for (s, v) in &review.sells {
+                            theme::tone_pill(ui, &format!("SELL {s} · {}", money(*v)), Tone::Loss);
+                        }
+                    });
                 }
             });
-            if let Some(msg) = &review.message {
-                ui.colored_label(ui.visuals().warn_fg_color, msg);
-            }
+            ui.add_space(10.0);
+
+            let mut remove = None;
+            let mut clicked_col = None;
+            let sort = review.sort;
+            theme::card(ui).inner_margin(egui::Margin::symmetric(14, 8)).show(ui, |ui| {
+                egui::ScrollArea::both().max_height(ui.available_height() - 70.0).auto_shrink([false, true]).show(ui, |ui| {
+                    TableBuilder::new(ui)
+                        .id_salt("review_table")
+                        .striped(true)
+                        .vscroll(false)
+                        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                        .column(Column::exact(72.0))
+                        .column(Column::initial(230.0).clip(true))
+                        .column(Column::initial(170.0))
+                        .columns(Column::initial(90.0), 6)
+                        .column(Column::exact(80.0))
+                        .header(26.0, |mut h| {
+                            for (i, label) in REVIEW_COLUMNS.iter().enumerate() {
+                                h.col(|ui| {
+                                    if label.is_empty() {
+                                        return;
+                                    }
+                                    let active = sort.and_then(|(c, asc)| (c == i).then_some(asc));
+                                    let hint = match *label {
+                                        "Weight" => "Your relative weight. Drag or type to change it.",
+                                        "Share" => "Weight rescaled so the basket totals 100%",
+                                        _ => "",
+                                    };
+                                    if theme::sort_header(ui, label, active, hint) {
+                                        clicked_col = Some(i);
+                                    }
+                                });
+                            }
+                        })
+                        .body(|mut body| {
+                            for (i, line) in review.lines.iter_mut().enumerate() {
+                                let md = market.get(&line.symbol);
+                                let fig = |s: String| RichText::new(s).font(theme::mono(12.5)).color(p.ink);
+                                body.row(28.0, |mut row| {
+                                    row.col(|ui| {
+                                        ui.label(RichText::new(&line.symbol).font(theme::mono_semibold(13.0)));
+                                    });
+                                    row.col(|ui| {
+                                        let name = md.and_then(|m| m.description.as_deref()).unwrap_or("");
+                                        ui.label(name).on_hover_text(name);
+                                    });
+                                    row.col(|ui| {
+                                        ui.label(RichText::new(&line.sector).color(p.muted));
+                                    });
+                                    row.col(|ui| {
+                                        right(ui, fig(md.and_then(|m| m.div_yield).map(|y| format!("{y:.2}%")).unwrap_or("—".into())));
+                                    });
+                                    row.col(|ui| {
+                                        right(ui, fig(prices[i].map(|p| format!("{p:.2}")).unwrap_or("—".into())));
+                                    });
+                                    row.col(|ui| {
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            ui.add(egui::DragValue::new(&mut line.weight_pct).range(0.0..=100.0).speed(0.1).suffix("%").max_decimals(2))
+                                                .on_hover_text("Relative weight. Drag or click to type; the basket is rescaled to 100%.");
+                                        });
+                                    });
+                                    row.col(|ui| {
+                                        right(ui, fig(format!("{:.2}%", shares[i] * 100.0)));
+                                    });
+                                    row.col(|ui| {
+                                        right(ui, fig(money(alloc[i].dollars)));
+                                    });
+                                    row.col(|ui| {
+                                        if prices[i].is_some() {
+                                            right(ui, RichText::new(fmt_qty(alloc[i].quantity)).font(theme::mono_semibold(12.5)));
+                                        } else {
+                                            right(ui, RichText::new("no price").color(p.warn));
+                                        }
+                                    });
+                                    row.col(|ui| {
+                                        if ui.small_button("Remove").on_hover_text("Take this stock out of the basket").clicked() {
+                                            remove = Some(i);
+                                        }
+                                    });
+                                });
+                            }
+                        });
+                });
+            });
+
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let resp = ui.add(egui::TextEdit::singleline(&mut review.add_input).hint_text("Ticker, e.g. MSFT").desired_width(130.0));
+                let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if (ui.button("Add to basket").clicked() || enter) && !review.add_input.trim().is_empty() {
+                    add = Some(review.add_input.trim().to_uppercase());
+                }
+                ui.separator();
+                if ui.button("Reset to index weights").on_hover_text("Weight each stock by its S&P 500 weight").clicked() {
+                    reset_weights(&mut review.lines);
+                }
+                if let Some(msg) = &review.message {
+                    ui.label(RichText::new(msg).color(p.warn));
+                }
+            });
 
             if let Some(i) = remove {
                 review.lines.remove(i);
@@ -533,3 +568,26 @@ fn reset_weights(lines: &mut [Line]) {
 
 /// Short explanation shown on a disabled Discard box.
 pub const DISCARD_HINT: &str = "Only held stocks below purchase price (including dividends) can be discarded";
+
+fn right(ui: &mut egui::Ui, text: RichText) {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.label(text);
+    });
+}
+
+/// Ticker, company name, optional value, and a labelled Remove button.
+fn list_row(ui: &mut egui::Ui, symbol: &str, name: &str, value: Option<&str>, on_remove: impl FnOnce()) {
+    let p = pal(ui);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(symbol).font(theme::mono_semibold(theme::BODY)));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.small_button("Remove").clicked() {
+                on_remove();
+            }
+            if let Some(v) = value {
+                ui.label(RichText::new(v).font(theme::mono(12.5)));
+            }
+            ui.add(egui::Label::new(RichText::new(name).color(p.muted)).truncate()).on_hover_text(name);
+        });
+    });
+}

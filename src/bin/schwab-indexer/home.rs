@@ -3,12 +3,13 @@
 
 use std::cmp::Ordering;
 
-use eframe::egui::{self, Color32, RichText};
+use eframe::egui::{self, CornerRadius, Margin, RichText, Stroke};
 use egui_extras::{Column, TableBuilder};
 use schwab::{api::MarketData, portfolio::Held, universe::Constituent};
 
-use crate::app::{group_thousands, money, ticker_with_name, IndexerApp};
+use crate::app::{group_thousands, money, IndexerApp};
 use crate::modes::{Mode, DISCARD_HINT};
+use crate::theme::{self, pal, Tone};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Col {
@@ -124,27 +125,6 @@ fn opt(v: Option<f64>, f: impl Fn(f64) -> String) -> String {
     v.map(f).unwrap_or_else(|| "—".into())
 }
 
-fn gain_color(ui: &egui::Ui, v: f64) -> Color32 {
-    let dark = ui.visuals().dark_mode;
-    match (v >= 0.0, dark) {
-        (true, true) => Color32::from_rgb(110, 200, 120),
-        (true, false) => Color32::from_rgb(20, 120, 40),
-        (false, true) => Color32::from_rgb(235, 110, 100),
-        (false, false) => Color32::from_rgb(180, 30, 30),
-    }
-}
-
-/// Faint row background for held positions.
-fn row_tint(ui: &egui::Ui, held: Option<&Held>) -> Option<Color32> {
-    let h = held?;
-    let alpha = if ui.visuals().dark_mode { 40 } else { 30 };
-    Some(if h.is_losing() {
-        Color32::from_rgba_unmultiplied(220, 50, 40, alpha)
-    } else {
-        Color32::from_rgba_unmultiplied(40, 180, 70, alpha)
-    })
-}
-
 enum Action {
     SetDnt(String, bool),
     Select(String, bool),
@@ -159,6 +139,7 @@ impl IndexerApp {
             Mode::Execute => return self.execute_ui(ui),
             _ => {}
         }
+        self.summary_strip(ui);
         if self.show_dnt_panel {
             self.dnt_panel(ui);
         }
@@ -167,120 +148,190 @@ impl IndexerApp {
             Mode::Rebalance => self.rebalance_panel(ui),
             Mode::Browse | Mode::Review | Mode::Execute => {}
         }
-        egui::CentralPanel::default().show(ui, |ui| self.sectors_ui(ui));
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(pal(ui).bg).inner_margin(Margin::symmetric(18, 10)))
+            .show(ui, |ui| self.sectors_ui(ui));
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::top("account_bar").show(ui, |ui| {
-            ui.add_space(4.0);
+        let p = pal(ui);
+        let frame = egui::Frame::new()
+            .fill(p.surface)
+            .stroke(Stroke::new(1.0, p.border))
+            .inner_margin(Margin::symmetric(18, 10));
+        egui::Panel::top("app_bar").frame(frame).show(ui, |ui| {
             ui.horizontal(|ui| {
-                match (&self.account.value, self.account.loading) {
-                    (_, true) => {
-                        ui.spinner();
-                        ui.label("Loading account…");
-                    }
-                    (Some(acct), false) => {
-                        let n = &acct.account_number;
-                        ui.label(format!("Account …{}", &n[n.len().saturating_sub(4)..]));
-                        ui.separator();
-                        ui.label(RichText::new(format!("Cash {}", money(acct.cash_balance))).strong().size(16.0));
-                    }
-                    (None, false) => {
-                        ui.label("No account loaded");
-                    }
-                }
-                if self.dividends.loading {
-                    ui.separator();
-                    ui.spinner();
-                    ui.label("Loading dividend history…");
-                }
+                ui.label(RichText::new("Indexer").font(theme::sans_semibold(18.0)).color(p.ink));
+                theme::tone_pill(ui, "S&P 500", Tone::Accent);
+                ui.add_space(18.0);
+                self.mode_switcher(ui);
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Log in again").clicked() {
                         self.relogin();
                     }
                     let busy = self.account.loading || self.market.loading || self.universe.loading;
+                    let locked = self.mode == Mode::Execute;
                     if ui
-                        .add_enabled(!busy, egui::Button::new("Refresh index data"))
+                        .add_enabled(!busy && !locked, egui::Button::new("Update index"))
                         .on_hover_text("Re-download S&P 500 weights and sectors from State Street")
                         .clicked()
                     {
                         self.load_universe(true);
                     }
                     if ui
-                        .add_enabled(!busy, egui::Button::new("Refresh"))
-                        .on_hover_text("Reload account, positions and quotes")
+                        .add_enabled(!busy && !locked, egui::Button::new("Refresh quotes"))
+                        .on_hover_text("Reload your account, positions and all quotes")
                         .clicked()
                     {
                         self.load_account();
                         self.load_market();
                     }
-                    ui.toggle_value(&mut self.show_dnt_panel, format!("Do not transact ({})", self.dnt.len()));
-                    ui.separator();
-                    // No switching modes while orders are being placed/tracked.
-                    let ready = self.universe.value.is_some() && self.mode != Mode::Execute;
-                    for (mode, label, hover) in [
-                        (Mode::Rebalance, "Rebalance", "Replace losing holdings"),
+                    let dnt = format!("Do not transact · {}", self.dnt.len());
+                    ui.add_enabled_ui(!locked, |ui| ui.toggle_value(&mut self.show_dnt_panel, dnt));
+                });
+            });
+        });
+    }
+
+    /// Browse | Create | Rebalance, as one segmented control.
+    fn mode_switcher(&mut self, ui: &mut egui::Ui) {
+        let p = pal(ui);
+        let current = match self.mode {
+            Mode::Review | Mode::Execute => {
+                if self.review.as_ref().is_some_and(|r| r.rebalance) { Mode::Rebalance } else { Mode::Create }
+            }
+            m => m,
+        };
+        let enabled = self.universe.value.is_some() && self.mode != Mode::Execute;
+        egui::Frame::new()
+            .fill(p.neutral_soft)
+            .corner_radius(CornerRadius::same(8))
+            .inner_margin(Margin::same(3))
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                ui.horizontal(|ui| {
+                    for (mode, label, hint) in [
+                        (Mode::Browse, "Browse", "Explore the index"),
                         (Mode::Create, "Create", "Build a new basket"),
+                        (Mode::Rebalance, "Rebalance", "Replace holdings that are below cost"),
                     ] {
-                        let active = self.mode == mode
-                            || (self.mode == Mode::Review && self.review.as_ref().is_some_and(|r| r.rebalance == (mode == Mode::Rebalance)));
-                        let resp = ui.add_enabled(ready, egui::Button::selectable(active, label)).on_hover_text(hover);
-                        if resp.clicked() {
-                            self.mode = if active { Mode::Browse } else { mode };
+                        let on = current == mode;
+                        let text = RichText::new(label)
+                            .font(if on { theme::sans_semibold(theme::BODY) } else { theme::sans_medium(theme::BODY) })
+                            .color(if on { p.ink } else { p.muted });
+                        let button = egui::Button::new(text)
+                            .fill(if on { p.surface } else { p.neutral_soft })
+                            .stroke(if on { Stroke::new(1.0, p.border) } else { Stroke::NONE })
+                            .corner_radius(CornerRadius::same(6))
+                            .min_size(egui::Vec2::new(86.0, 26.0));
+                        if ui.add_enabled(enabled, button).on_hover_text(hint).clicked() && !on {
+                            self.mode = mode;
                         }
                     }
                 });
             });
+    }
 
-            let err = ui.visuals().error_fg_color;
-            let warn = ui.visuals().warn_fg_color;
+    fn summary_strip(&mut self, ui: &mut egui::Ui) {
+        let p = pal(ui);
+        egui::Panel::top("summary").frame(egui::Frame::new().fill(p.bg).inner_margin(Margin { left: 18, right: 18, top: 14, bottom: 4 })).show(ui, |ui| {
+            theme::card(ui).inner_margin(Margin::symmetric(18, 12)).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 34.0;
+                    match &self.account.value {
+                        Some(acct) => {
+                            theme::stat(ui, "Cash", &money(acct.cash_balance), None);
+                            let value: f64 = self.held.values().map(|h| h.market_value).sum();
+                            let ret: f64 = self.held.values().map(Held::total_return).sum();
+                            theme::stat(ui, "Stock holdings", &money(value), None);
+                            let color = if ret >= 0.0 { p.gain } else { p.loss };
+                            theme::stat(ui, "Gain / loss incl. dividends", &money(ret), Some(color));
+                            theme::stat(ui, "Positions", &self.held.len().to_string(), None);
+                        }
+                        None if self.account.loading => {
+                            ui.spinner();
+                            ui.label("Loading account…");
+                        }
+                        None => {
+                            ui.label("No account loaded");
+                        }
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        let n = &self.account.value.as_ref().map(|a| a.account_number.clone()).unwrap_or_default();
+                        if !n.is_empty() {
+                            ui.label(RichText::new(format!("Account ···{}", &n[n.len().saturating_sub(4)..])).color(p.muted));
+                        }
+                        if let Some(u) = &self.universe.value {
+                            let date = u.source_as_of.as_deref().unwrap_or("").trim_start_matches("As of ").to_string();
+                            theme::tone_pill(ui, &format!("Weights {date}"), Tone::Neutral);
+                        }
+                        if self.market.loading || self.universe.loading {
+                            ui.spinner();
+                            ui.label(RichText::new("Loading quotes…").color(p.muted));
+                        } else if let Some(m) = &self.market.value {
+                            theme::tone_pill(ui, &format!("{} quotes", m.len()), Tone::Neutral);
+                        }
+                        if self.dividends.loading {
+                            ui.label(RichText::new("Loading dividends…").color(p.muted));
+                        }
+                    });
+                });
+            });
+
             for (label, e) in [
                 ("Account", &self.account.error),
                 ("Index data", &self.universe.error),
                 ("Quotes", &self.market.error),
                 ("Dividends", &self.dividends.error),
-                ("Do-not-transact", &self.dnt_error),
+                ("Do-not-transact list", &self.dnt_error),
             ] {
                 if let Some(e) = e {
-                    ui.colored_label(err, format!("{label}: {e}"));
+                    ui.colored_label(p.loss, format!("{label}: {e}"));
                 }
             }
             if let Some(u) = &self.universe.value {
                 for w in &u.warnings {
-                    ui.colored_label(warn, w);
+                    ui.label(RichText::new(w).color(p.warn).font(theme::sans(theme::SMALL)));
                 }
             }
-            ui.add_space(4.0);
         });
     }
 
     fn dnt_panel(&mut self, ui: &mut egui::Ui) {
+        let p = pal(ui);
         let mut remove = None;
         let mut add = None;
         let names = self.names(&self.dnt);
-        egui::Panel::right("dnt_panel").default_size(220.0).show(ui, |ui| {
-            ui.heading("Do not transact");
-            ui.label("Never bought or sold by Create/Rebalance.");
-            ui.add_space(6.0);
+        let frame = egui::Frame::new().fill(p.surface).stroke(Stroke::new(1.0, p.border)).inner_margin(Margin::same(16));
+        egui::Panel::right("dnt_panel").frame(frame).default_size(260.0).show(ui, |ui| {
+            ui.label(RichText::new("Do not transact").font(theme::sans_semibold(theme::TITLE)));
+            ui.label(RichText::new("Create and Rebalance never buy or sell these.").color(p.muted));
+            ui.add_space(8.0);
             ui.horizontal(|ui| {
-                let resp = ui.add(egui::TextEdit::singleline(&mut self.dnt_input).hint_text("Symbol").desired_width(100.0));
+                let resp = ui.add(egui::TextEdit::singleline(&mut self.dnt_input).hint_text("Ticker, e.g. TSLA").desired_width(130.0));
                 let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if (ui.button("Add").clicked() || enter) && !self.dnt_input.trim().is_empty() {
+                if (ui.add(theme::primary(ui, "Add")).clicked() || enter) && !self.dnt_input.trim().is_empty() {
                     add = Some(self.dnt_input.trim().to_uppercase());
                 }
             });
+            ui.add_space(6.0);
             ui.separator();
             egui::ScrollArea::vertical().show(ui, |ui| {
                 if self.dnt.is_empty() {
-                    ui.weak("Empty — tick a row's box to add it.");
+                    ui.label(RichText::new("Nothing blocked yet. Use a row's Block button or add a ticker above.").color(p.muted));
                 }
                 for sym in &self.dnt {
                     ui.horizontal(|ui| {
-                        if ui.small_button("✕").on_hover_text("Remove").clicked() {
-                            remove = Some(sym.clone());
-                        }
-                        ticker_with_name(ui, sym, &names[sym]);
+                        ui.label(RichText::new(sym).font(theme::mono_semibold(theme::BODY)));
+                        let name = &names[sym];
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("Remove").clicked() {
+                                remove = Some(sym.clone());
+                            }
+                            ui.add(egui::Label::new(RichText::new(name).color(p.muted)).truncate()).on_hover_text(name);
+                        });
                     });
                 }
             });
@@ -295,6 +346,7 @@ impl IndexerApp {
     }
 
     fn sectors_ui(&mut self, ui: &mut egui::Ui) {
+        let p = pal(ui);
         let Some(universe) = &self.universe.value else {
             if self.universe.loading {
                 ui.horizontal(|ui| {
@@ -305,29 +357,19 @@ impl IndexerApp {
             return;
         };
 
-        ui.horizontal(|ui| {
-            ui.weak(format!(
-                "S&P 500 · {} companies · weights {}",
-                universe.constituents.len(),
-                universe.source_as_of.as_deref().unwrap_or("(date unknown)").to_lowercase()
-            ));
-            if self.market.loading {
-                ui.spinner();
-                ui.weak("Loading quotes…");
-            }
-        });
-        ui.add_space(4.0);
-
         let empty = Default::default();
         let market = self.market.value.as_ref().unwrap_or(&empty);
         let mut actions = Vec::new();
+        let sectors = universe.sectors_by_weight();
+        let max_weight = sectors.first().map_or(1.0, |(_, w)| *w);
 
         egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-            for (sector, sector_weight) in universe.sectors_by_weight() {
+            ui.spacing_mut().item_spacing.y = 10.0;
+            for (sector, sector_weight) in &sectors {
                 let mut rows: Vec<Row> = universe
                     .constituents
                     .iter()
-                    .filter(|c| c.sector == sector)
+                    .filter(|c| &c.sector == sector)
                     .map(|c| {
                         let held = self.held.get(&c.symbol);
                         let dnt = self.dnt.contains(&c.symbol);
@@ -342,18 +384,35 @@ impl IndexerApp {
                         Row { c, md: market.get(&c.symbol), held, dnt, selected, selectable }
                     })
                     .collect();
-                let sort = self.sort.get(&sector).copied().unwrap_or_default();
+                let sort = self.sort.get(sector).copied().unwrap_or_default();
                 rows.sort_by(|a, b| compare(a, b, sort));
-
                 let n_held = rows.iter().filter(|r| r.held.is_some()).count();
-                let mut title = format!("{sector}   {:.1}%   {} stocks", sector_weight * 100.0, rows.len());
-                if n_held > 0 {
-                    title.push_str(&format!("   · {n_held} held"));
-                }
+                let n_losing = rows.iter().filter(|r| r.held.is_some_and(Held::is_losing)).count();
+                let n_selected = rows.iter().filter(|r| r.selected).count();
 
-                egui::CollapsingHeader::new(RichText::new(title).strong())
-                    .id_salt(&sector)
-                    .show(ui, |ui| sector_table(ui, &sector, &rows, sort, self.mode, &mut actions));
+                theme::card(ui).inner_margin(Margin::symmetric(14, 8)).show(ui, |ui| {
+                    let id = ui.make_persistent_id(("sector", sector.as_str()));
+                    egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
+                        .show_header(ui, |ui| {
+                            ui.label(RichText::new(sector.as_str()).font(theme::sans_semibold(theme::TITLE)).color(p.ink));
+                            ui.add_space(8.0);
+                            theme::weight_bar(ui, (*sector_weight / max_weight) as f32, 110.0);
+                            ui.label(RichText::new(format!("{:.1}%", sector_weight * 100.0)).font(theme::mono_medium(theme::BODY)));
+                            ui.label(RichText::new(format!("{} stocks", rows.len())).color(p.muted));
+                            if n_held > 0 {
+                                let tone = if n_losing > 0 { Tone::Loss } else { Tone::Gain };
+                                theme::tone_pill(ui, &format!("{n_held} held"), tone);
+                            }
+                            if n_selected > 0 {
+                                let label = if self.mode == Mode::Rebalance { "discarding" } else { "in basket" };
+                                theme::tone_pill(ui, &format!("{n_selected} {label}"), Tone::Accent);
+                            }
+                        })
+                        .body_unindented(|ui| {
+                            ui.add_space(4.0);
+                            sector_table(ui, sector, &rows, sort, self.mode, &mut actions);
+                        });
+                });
             }
         });
 
@@ -382,51 +441,46 @@ impl IndexerApp {
 }
 
 fn sector_table(ui: &mut egui::Ui, sector: &str, rows: &[Row], sort: SortState, mode: Mode, actions: &mut Vec<Action>) {
-    let select_label = match mode {
-        Mode::Create => Some("Basket"),
-        Mode::Rebalance => Some("Discard"),
+    let select = match mode {
+        Mode::Create => Some(("Basket", "Add", "✓ In basket", "Click to remove from the basket")),
+        Mode::Rebalance => Some(("Discard", "Discard", "✓ Discarding", "Click to keep this holding")),
         Mode::Browse | Mode::Review | Mode::Execute => None,
     };
+    let p = pal(ui);
     let mut table = TableBuilder::new(ui)
         .id_salt(sector)
         .striped(true)
         .vscroll(false)
         .resizable(true)
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
-    if select_label.is_some() {
-        table = table.column(Column::exact(52.0));
+    if select.is_some() {
+        table = table.column(Column::exact(104.0));
     }
-    table = table.column(Column::exact(28.0));
+    table = table.column(Column::exact(76.0));
     for (col, _, _) in COLUMNS {
         table = table.column(match col {
-            Col::Name => Column::initial(200.0).clip(true),
-            Col::Symbol => Column::initial(64.0),
-            _ => Column::initial(78.0),
+            Col::Name => Column::initial(210.0).clip(true),
+            Col::Symbol => Column::initial(70.0),
+            Col::Freq => Column::initial(92.0),
+            Col::Volume | Col::Return => Column::initial(104.0),
+            _ => Column::initial(80.0),
         });
     }
 
     table
-        .header(22.0, |mut header| {
-            if let Some(label) = select_label {
+        .header(26.0, |mut header| {
+            if let Some((label, ..)) = select {
                 header.col(|ui| {
-                    ui.strong(label);
+                    ui.label(theme::eyebrow(ui, label));
                 });
             }
             header.col(|ui| {
-                ui.label("DNT").on_hover_text("Do not transact");
+                ui.label(theme::eyebrow(ui, "Block")).on_hover_text("Do not transact: never bought or sold by Create/Rebalance");
             });
             for (col, label, hover) in COLUMNS {
                 header.col(|ui| {
-                    let arrow = match (sort.col == *col, sort.ascending) {
-                        (true, true) => " ▲",
-                        (true, false) => " ▼",
-                        _ => "",
-                    };
-                    let mut resp = ui.add(egui::Button::new(RichText::new(format!("{label}{arrow}")).strong()).frame(false));
-                    if !hover.is_empty() {
-                        resp = resp.on_hover_text(*hover);
-                    }
-                    if resp.clicked() {
+                    let active = (sort.col == *col).then_some(sort.ascending);
+                    if theme::sort_header(ui, label, active, hover) {
                         actions.push(Action::Sort(sector.to_string(), *col));
                     }
                 });
@@ -434,32 +488,47 @@ fn sector_table(ui: &mut egui::Ui, sector: &str, rows: &[Row], sort: SortState, 
         })
         .body(|mut body| {
             for r in rows {
-                body.row(20.0, |mut row| {
-                    if select_label.is_some() {
+                body.row(26.0, |mut row| {
+                    let stripe = r.held.map(|h| if h.is_losing() { p.loss } else { p.gain });
+                    let mut first = true;
+                    let mut mark = |ui: &mut egui::Ui| {
+                        if first {
+                            if let Some(c) = stripe {
+                                theme::left_stripe(ui, c);
+                            }
+                            first = false;
+                        }
+                    };
+                    if let Some((_, off, on, remove_hint)) = select {
                         row.col(|ui| {
-                            paint_tint(ui, r.held);
-                            let mut on = r.selected;
-                            let resp = ui.add_enabled(r.selectable, egui::Checkbox::without_text(&mut on));
+                            mark(ui);
+                            let tone = if mode == Mode::Rebalance { Tone::Loss } else { Tone::Accent };
+                            let resp = theme::toggle_button(ui, r.selected, off, on, tone, r.selectable);
+                            let resp = if r.selected { resp.on_hover_text(remove_hint) } else { resp };
                             let resp = if mode == Mode::Rebalance {
                                 resp.on_disabled_hover_text(DISCARD_HINT)
                             } else {
-                                resp.on_disabled_hover_text("On the do-not-transact list")
+                                resp.on_disabled_hover_text("Blocked: on the do-not-transact list")
                             };
-                            if resp.changed() {
-                                actions.push(Action::Select(r.c.symbol.clone(), on));
+                            if resp.clicked() {
+                                actions.push(Action::Select(r.c.symbol.clone(), !r.selected));
                             }
                         });
                     }
                     row.col(|ui| {
-                        paint_tint(ui, r.held);
-                        let mut on = r.dnt;
-                        if ui.checkbox(&mut on, "").on_hover_text("Do not transact").changed() {
-                            actions.push(Action::SetDnt(r.c.symbol.clone(), on));
+                        mark(ui);
+                        let resp = theme::toggle_button(ui, r.dnt, "Block", "Blocked", Tone::Warn, true).on_hover_text(if r.dnt {
+                            "On the do-not-transact list. Click to unblock."
+                        } else {
+                            "Add to the do-not-transact list"
+                        });
+                        if resp.clicked() {
+                            actions.push(Action::SetDnt(r.c.symbol.clone(), !r.dnt));
                         }
                     });
                     for (col, _, _) in COLUMNS {
                         row.col(|ui| {
-                            paint_tint(ui, r.held);
+                            mark(ui);
                             cell(ui, r, *col);
                         });
                     }
@@ -468,32 +537,32 @@ fn sector_table(ui: &mut egui::Ui, sector: &str, rows: &[Row], sort: SortState, 
         });
 }
 
-fn paint_tint(ui: &mut egui::Ui, held: Option<&Held>) {
-    if let Some(t) = row_tint(ui, held) {
-        ui.painter().rect_filled(ui.max_rect(), 0.0, t);
-    }
+fn right(ui: &mut egui::Ui, text: RichText) {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.label(text);
+    });
 }
 
 fn cell(ui: &mut egui::Ui, r: &Row, col: Col) {
+    let p = pal(ui);
     let md = r.md;
-    let text = match col {
+    let figure = |s: String| RichText::new(s).font(theme::mono(12.5)).color(p.ink);
+    match col {
         Col::Symbol => {
-            let resp = ui.label(RichText::new(&r.c.symbol).monospace().strong());
+            let resp = ui.label(RichText::new(&r.c.symbol).font(theme::mono_semibold(13.0)).color(p.ink));
             if !r.c.merged.is_empty() {
                 resp.on_hover_text(format!("Includes {}", r.c.merged.join(", ")));
             }
-            return;
         }
         Col::Name => {
-            ui.label(r.name()).on_hover_text(r.name());
-            return;
+            ui.label(RichText::new(r.name()).color(p.ink)).on_hover_text(r.name());
         }
         Col::Return => {
             if let Some(h) = r.held {
                 let v = h.total_return();
-                let color = gain_color(ui, v);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(money(v)).color(color)).on_hover_text(format!(
+                    let tone = if v >= 0.0 { Tone::Gain } else { Tone::Loss };
+                    theme::tone_pill(ui, &money(v), tone).on_hover_text(format!(
                         "Value {}  +  dividends {}  −  cost {}",
                         money(h.market_value),
                         money(h.dividends),
@@ -501,29 +570,27 @@ fn cell(ui: &mut egui::Ui, r: &Row, col: Col) {
                     ));
                 });
             }
-            return;
         }
         Col::Change => {
             if let Some(v) = md.and_then(|m| m.net_percent_change) {
-                let color = gain_color(ui, v);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(format!("{v:+.2}%")).color(color));
-                });
+                let color = if v >= 0.0 { p.gain } else { p.loss };
+                right(ui, RichText::new(format!("{v:+.2}%")).font(theme::mono(12.5)).color(color));
             }
-            return;
         }
-        Col::Weight => format!("{:.3}%", r.c.weight * 100.0),
-        Col::Price => opt(r.num(col), |v| format!("{v:.2}")),
-        Col::Low52 | Col::High52 | Col::Eps => opt(r.num(col), |v| format!("{v:.2}")),
-        Col::Pe => opt(r.num(col), |v| format!("{v:.1}")),
-        Col::Yield => opt(r.num(col), |v| format!("{v:.2}%")),
-        Col::Freq => freq_label(md.and_then(|m| m.div_freq)).to_string(),
-        Col::Volume => opt(r.num(col), |v| group_thousands(&format!("{v:.0}"))),
-        Col::Held => r.held.map(|h| fmt_qty(h.quantity)).unwrap_or_default(),
-    };
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        ui.label(text);
-    });
+        Col::Freq => {
+            ui.label(RichText::new(freq_label(md.and_then(|m| m.div_freq))).color(p.muted));
+        }
+        Col::Held => {
+            if let Some(h) = r.held {
+                right(ui, RichText::new(fmt_qty(h.quantity)).font(theme::mono_semibold(12.5)).color(p.ink));
+            }
+        }
+        Col::Weight => right(ui, figure(format!("{:.3}%", r.c.weight * 100.0))),
+        Col::Price | Col::Low52 | Col::High52 | Col::Eps => right(ui, figure(opt(r.num(col), |v| format!("{v:.2}")))),
+        Col::Pe => right(ui, figure(opt(r.num(col), |v| format!("{v:.1}")))),
+        Col::Yield => right(ui, figure(opt(r.num(col), |v| format!("{v:.2}%")))),
+        Col::Volume => right(ui, figure(opt(r.num(col), |v| group_thousands(&format!("{v:.0}"))))),
+    }
 }
 
 /// Share counts: whole numbers plainly, fractions to 4 places, no trailing zeros.

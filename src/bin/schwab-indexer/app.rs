@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 
-use eframe::egui;
+use eframe::egui::{self, RichText};
 use schwab::{
     accounts::Account,
     api::MarketData,
@@ -12,6 +12,7 @@ use schwab::{
 
 use crate::execute::Execution;
 use crate::home::SortState;
+use crate::theme;
 use crate::modes::{Mode, Review};
 use crate::worker::{Msg, Worker};
 
@@ -248,54 +249,76 @@ impl IndexerApp {
     }
 
     fn login_ui(&mut self, ui: &mut egui::Ui) {
+        let p = crate::theme::pal(ui);
         let Screen::Login(form) = &mut self.screen else { return };
 
         ui.vertical_centered(|ui| {
-            ui.add_space(60.0);
-            ui.heading("Connect to Schwab");
+            ui.add_space((ui.available_height() * 0.14).max(24.0));
+            ui.label(RichText::new("Indexer").font(theme::sans_semibold(30.0)).color(p.ink));
+            ui.label(RichText::new("Build and rebalance an S&P 500 basket in your Schwab account").color(p.muted));
             ui.add_space(20.0);
         });
 
-        egui::Grid::new("login_grid").num_columns(2).spacing([12.0, 10.0]).show(ui, |ui| {
-            ui.label("App key");
-            ui.add(egui::TextEdit::singleline(&mut form.app_key).desired_width(420.0));
-            ui.end_row();
-            ui.label("App secret");
-            ui.add(egui::TextEdit::singleline(&mut form.app_secret).password(true).desired_width(420.0));
-            ui.end_row();
+        let width = 460.0;
+        ui.vertical_centered(|ui| {
+            ui.set_max_width(width);
+            theme::card(ui).inner_margin(egui::Margin::same(22)).show(ui, |ui| {
+                ui.set_width(width - 44.0);
+                ui.label(RichText::new("Connect to Schwab").font(theme::sans_semibold(theme::TITLE)));
+                ui.label(RichText::new("Use the app key and secret from your Schwab developer portal. They're saved on this Mac only.").color(p.muted));
+                ui.add_space(12.0);
+
+                ui.label(theme::eyebrow(ui, "App key"));
+                ui.add(egui::TextEdit::singleline(&mut form.app_key).desired_width(f32::INFINITY));
+                ui.add_space(4.0);
+                ui.label(theme::eyebrow(ui, "App secret"));
+                ui.add(egui::TextEdit::singleline(&mut form.app_secret).password(true).desired_width(f32::INFINITY));
+                ui.add_space(12.0);
+
+                let can_begin = !form.busy && !form.app_key.trim().is_empty() && !form.app_secret.trim().is_empty();
+                let label = if form.auth_url.is_some() { "Open Schwab login again" } else { "Step 1 · Open Schwab login" };
+                if ui.add_enabled_ui(can_begin, |ui| ui.add_sized([ui.available_width(), 34.0], theme::primary(ui, label))).inner.clicked() {
+                    form.busy = true;
+                    form.error = None;
+                    self.worker.begin_login(form.app_key.trim().to_string(), form.app_secret.trim().to_string());
+                }
+
+                if let Some(url) = &form.auth_url {
+                    ui.add_space(14.0);
+                    ui.separator();
+                    ui.label(RichText::new("Step 2 · Paste the redirect URL").font(theme::sans_semibold(theme::BODY)));
+                    ui.label(
+                        RichText::new(
+                            "After you approve access, the browser goes to a page that won't load. \
+                             That's expected. Copy the whole address from the address bar and paste it here.",
+                        )
+                        .color(p.muted),
+                    );
+                    ui.add(egui::TextEdit::singleline(&mut form.pasted_url).hint_text("https://127.0.0.1/?code=…").desired_width(f32::INFINITY));
+                    ui.add_space(6.0);
+                    let can_complete = !form.busy && !form.pasted_url.trim().is_empty();
+                    if ui.add_enabled_ui(can_complete, |ui| ui.add_sized([ui.available_width(), 34.0], theme::primary(ui, "Finish connecting"))).inner.clicked() {
+                        form.busy = true;
+                        form.error = None;
+                        self.worker.complete_login(form.pasted_url.trim().to_string());
+                    }
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("Browser didn't open?").color(p.muted).font(theme::sans(theme::SMALL)));
+                        ui.hyperlink_to(RichText::new("Open the login page").font(theme::sans(theme::SMALL)), url);
+                    });
+                }
+
+                if form.busy {
+                    ui.add_space(6.0);
+                    ui.spinner();
+                }
+                if let Some(err) = &form.error {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new(err).color(p.loss));
+                }
+            });
         });
-
-        ui.add_space(10.0);
-        let can_begin = !form.busy && !form.app_key.trim().is_empty() && !form.app_secret.trim().is_empty();
-        if ui.add_enabled(can_begin, egui::Button::new("1. Open Schwab login in browser")).clicked() {
-            form.busy = true;
-            form.error = None;
-            self.worker.begin_login(form.app_key.trim().to_string(), form.app_secret.trim().to_string());
-        }
-
-        if let Some(url) = &form.auth_url {
-            ui.add_space(10.0);
-            ui.label("If the browser didn't open, visit:");
-            ui.hyperlink(url);
-            ui.add_space(10.0);
-            ui.label("After approving, the browser redirects to a page that fails to load. \
-                      Copy the full URL from the address bar and paste it here:");
-            ui.add(egui::TextEdit::singleline(&mut form.pasted_url).desired_width(f32::INFINITY));
-            let can_complete = !form.busy && !form.pasted_url.trim().is_empty();
-            if ui.add_enabled(can_complete, egui::Button::new("2. Complete login")).clicked() {
-                form.busy = true;
-                form.error = None;
-                self.worker.complete_login(form.pasted_url.trim().to_string());
-            }
-        }
-
-        if form.busy {
-            ui.spinner();
-        }
-        if let Some(err) = &form.error {
-            ui.add_space(10.0);
-            ui.colored_label(ui.visuals().error_fg_color, err);
-        }
     }
 
     pub(crate) fn relogin(&mut self) {
@@ -316,24 +339,14 @@ impl eframe::App for IndexerApp {
                 });
             }
             Screen::Login(_) => {
-                egui::CentralPanel::default().show(ui, |ui| self.login_ui(ui));
+                let bg = theme::pal(ui).bg;
+                egui::CentralPanel::default().frame(egui::Frame::new().fill(bg).inner_margin(egui::Margin::same(16))).show(ui, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| self.login_ui(ui));
+                });
             }
             Screen::Home => self.home_ui(ui),
         }
     }
-}
-
-/// Ticker in monospace followed by the company name, dimmed and truncated.
-pub fn ticker_with_name(ui: &mut egui::Ui, symbol: &str, name: &str) {
-    ui.monospace(symbol);
-    if !name.is_empty() {
-        ui.add(egui::Label::new(egui::RichText::new(name).weak()).truncate()).on_hover_text(name);
-    }
-}
-
-/// "F (FORD MTR CO DEL)", or just the ticker when the name is unknown.
-pub fn ticker_and_name(symbol: &str, name: &str) -> String {
-    if name.is_empty() { symbol.to_string() } else { format!("{symbol} ({name})") }
 }
 
 /// `$1,234,567.89` style formatting.
