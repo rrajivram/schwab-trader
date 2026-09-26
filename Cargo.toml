@@ -16,6 +16,8 @@ clap = { version = "4", features = ["derive", "env"] }
 crossterm = { version = "0.28", features = ["event-stream"] }
 csv = "1"
 dirs = "5"
+eframe = "0.36"
+egui_extras = "0.36"
 futures-util = "0.3"
 ratatui = "0.29"
 reqwest = { version = "0.12", features = ["json"] }

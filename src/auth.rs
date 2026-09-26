@@ -17,24 +17,49 @@ struct TokenResponse {
     expires_in: u64,
 }
 
-pub async fn login(app_key: &str, app_secret: &str) -> Result<()> {
+/// The Schwab authorize URL the user must visit to approve access. Also
+/// persists the key/secret so `complete_login` and token refresh can use them.
+pub fn begin_login(app_key: &str, app_secret: &str) -> Result<String> {
     let mut config = Config::load()?;
     config.app_key = Some(app_key.to_string());
     config.app_secret = Some(app_secret.to_string());
+    config.save()?;
 
-    let auth_url = format!(
+    Ok(format!(
         "{}?response_type=code&client_id={}&redirect_uri={}",
         AUTH_URL,
         app_key,
         urlencoding::encode(&config.redirect_uri),
-    );
+    ))
+}
+
+/// Exchange the redirect URL the user pasted (containing `?code=...`) for
+/// tokens and save them. Call after `begin_login`.
+pub async fn complete_login(pasted_redirect_url: &str) -> Result<()> {
+    let mut config = Config::load()?;
+    let app_key = config.app_key.clone().context("App key not set — call begin_login first")?;
+    let app_secret = config.app_secret.clone().context("App secret not set — call begin_login first")?;
+
+    let code = extract_code(pasted_redirect_url.trim())?;
+    let tokens = exchange_code(&code, &app_key, &app_secret, &config.redirect_uri).await?;
+
+    config.access_token = Some(tokens.access_token);
+    config.refresh_token = tokens.refresh_token;
+    config.token_expiry = Some(Utc::now() + chrono::Duration::seconds(tokens.expires_in as i64));
+    config.save()?;
+    Ok(())
+}
+
+pub async fn login(app_key: &str, app_secret: &str) -> Result<()> {
+    let auth_url = begin_login(app_key, app_secret)?;
+    let redirect_uri = Config::load()?.redirect_uri;
 
     println!("Opening browser for Schwab authorization...\n");
     println!("If the browser doesn't open, visit this URL manually:\n{}\n", auth_url);
     let _ = webbrowser::open(&auth_url);
 
     println!("After you approve access, the browser will redirect to");
-    println!("  {} ", config.redirect_uri);
+    println!("  {} ", redirect_uri);
     println!("That page will fail to load — that's expected.");
     println!("Copy the full URL from the address bar and paste it here:\n");
     print!("> ");
@@ -43,15 +68,8 @@ pub async fn login(app_key: &str, app_secret: &str) -> Result<()> {
     let mut pasted = String::new();
     io::stdin().read_line(&mut pasted)?;
 
-    let code = extract_code(pasted.trim())?;
     println!("\nExchanging authorization code for tokens...");
-
-    let tokens = exchange_code(&code, app_key, app_secret, &config.redirect_uri).await?;
-
-    config.access_token = Some(tokens.access_token);
-    config.refresh_token = tokens.refresh_token;
-    config.token_expiry = Some(Utc::now() + chrono::Duration::seconds(tokens.expires_in as i64));
-    config.save()?;
+    complete_login(&pasted).await?;
 
     println!("Login successful. Tokens saved to ~/.config/schwab-cli/config.json");
     Ok(())

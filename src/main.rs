@@ -1,19 +1,7 @@
-mod accounts;
-mod api;
-mod auth;
-mod blacklist;
-mod config;
-mod indices;
-mod orders;
-mod pricing;
-mod rebalance;
-mod registry;
-mod stream;
-mod tui;
-mod watchlist;
-
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+
+use schwab::{api, auth, config, orders, pricing, tui};
 
 #[derive(Parser)]
 #[command(name = "schwab", about = "Schwab trading CLI / TUI")]
