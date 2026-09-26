@@ -1,6 +1,16 @@
-use eframe::egui;
-use schwab::{accounts::Account, config::Config};
+use std::collections::{BTreeSet, HashMap};
 
+use eframe::egui;
+use schwab::{
+    accounts::Account,
+    api::MarketData,
+    blacklist,
+    config::Config,
+    portfolio::{held_positions, Held},
+    universe::Universe,
+};
+
+use crate::home::SortState;
 use crate::worker::{Msg, Worker};
 
 enum Screen {
@@ -33,39 +43,123 @@ impl LoginForm {
     }
 }
 
+/// A value fetched in the background, with its in-flight/error state.
+pub struct Remote<T> {
+    pub value: Option<T>,
+    pub loading: bool,
+    pub error: Option<String>,
+}
+
+impl<T> Default for Remote<T> {
+    fn default() -> Self {
+        Self { value: None, loading: false, error: None }
+    }
+}
+
+impl<T> Remote<T> {
+    fn start(&mut self) {
+        self.loading = true;
+        self.error = None;
+    }
+
+    fn finish(&mut self, result: Result<T, String>) {
+        self.loading = false;
+        match result {
+            Ok(v) => self.value = Some(v),
+            Err(e) => self.error = Some(e),
+        }
+    }
+}
+
 pub struct IndexerApp {
     worker: Worker,
     screen: Screen,
-    account: Option<Account>,
-    account_loading: bool,
-    account_error: Option<String>,
+    pub(crate) account: Remote<Account>,
+    pub(crate) universe: Remote<Universe>,
+    pub(crate) market: Remote<HashMap<String, MarketData>>,
+    pub(crate) dividends: Remote<HashMap<String, f64>>,
+    /// Long positions keyed by universe symbol; rebuilt when the account or
+    /// dividends change.
+    pub(crate) held: HashMap<String, Held>,
+    /// "Do not transact" symbols — the same blacklist.json the CLI uses.
+    pub(crate) dnt: BTreeSet<String>,
+    pub(crate) dnt_input: String,
+    pub(crate) dnt_error: Option<String>,
+    pub(crate) show_dnt_panel: bool,
+    pub(crate) sort: HashMap<String, SortState>,
 }
 
 impl IndexerApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let worker = Worker::new(cc.egui_ctx.clone());
         worker.check_token();
+        let (dnt, dnt_error) = match blacklist::load() {
+            Ok(v) => (v.into_iter().collect(), None),
+            Err(e) => (BTreeSet::new(), Some(format!("Could not read do-not-transact list: {e}"))),
+        };
         Self {
             worker,
             screen: Screen::Starting,
-            account: None,
-            account_loading: false,
-            account_error: None,
+            account: Remote::default(),
+            universe: Remote::default(),
+            market: Remote::default(),
+            dividends: Remote::default(),
+            held: HashMap::new(),
+            dnt,
+            dnt_input: String::new(),
+            dnt_error,
+            show_dnt_panel: false,
+            sort: HashMap::new(),
         }
     }
 
-    fn load_account(&mut self) {
-        self.account_loading = true;
-        self.account_error = None;
+    fn enter_home(&mut self) {
+        self.screen = Screen::Home;
+        self.load_account();
+        if self.universe.value.is_none() {
+            self.load_universe(false);
+        } else {
+            self.load_market();
+        }
+    }
+
+    pub(crate) fn load_account(&mut self) {
+        self.account.start();
         self.worker.load_account();
+    }
+
+    pub(crate) fn load_universe(&mut self, force: bool) {
+        self.universe.start();
+        self.worker.load_universe(force);
+    }
+
+    pub(crate) fn load_market(&mut self) {
+        let Some(u) = &self.universe.value else { return };
+        let symbols = u.constituents.iter().map(|c| c.symbol.clone()).collect();
+        self.market.start();
+        self.worker.load_market(symbols);
+    }
+
+    fn rebuild_held(&mut self) {
+        let empty = HashMap::new();
+        let divs = self.dividends.value.as_ref().unwrap_or(&empty);
+        self.held = match &self.account.value {
+            Some(acct) => held_positions(acct, divs),
+            None => HashMap::new(),
+        };
+    }
+
+    pub(crate) fn set_dnt(&mut self, symbol: &str, on: bool) {
+        let changed = if on { self.dnt.insert(symbol.to_string()) } else { self.dnt.remove(symbol) };
+        if changed {
+            let list: Vec<String> = self.dnt.iter().cloned().collect();
+            self.dnt_error = blacklist::save(&list).err().map(|e| format!("Could not save list: {e}"));
+        }
     }
 
     fn handle(&mut self, msg: Msg) {
         match msg {
-            Msg::TokenChecked(Ok(())) => {
-                self.screen = Screen::Home;
-                self.load_account();
-            }
+            Msg::TokenChecked(Ok(())) => self.enter_home(),
             Msg::TokenChecked(Err(_)) => {
                 // Missing or unrefreshable tokens both just mean "log in".
                 self.screen = Screen::Login(LoginForm::prefilled(None));
@@ -82,10 +176,7 @@ impl IndexerApp {
                     }
                 }
             }
-            Msg::LoginCompleted(Ok(())) => {
-                self.screen = Screen::Home;
-                self.load_account();
-            }
+            Msg::LoginCompleted(Ok(())) => self.enter_home(),
             Msg::LoginCompleted(Err(e)) => {
                 if let Screen::Login(form) = &mut self.screen {
                     form.busy = false;
@@ -93,12 +184,23 @@ impl IndexerApp {
                 }
             }
             Msg::AccountLoaded(result) => {
-                self.account_loading = false;
-                match result {
-                    Ok(acct) => self.account = Some(acct),
-                    Err(e) => self.account_error = Some(e),
+                self.account.finish(result);
+                self.rebuild_held();
+                if let Some(acct) = &self.account.value {
+                    self.dividends.start();
+                    let held: Vec<String> = self.held.keys().cloned().collect();
+                    self.worker.load_dividends(acct.hash_value.clone(), held);
                 }
             }
+            Msg::DividendsLoaded(result) => {
+                self.dividends.finish(result);
+                self.rebuild_held();
+            }
+            Msg::UniverseLoaded(result) => {
+                self.universe.finish(result);
+                self.load_market();
+            }
+            Msg::MarketLoaded(result) => self.market.finish(result),
         }
     }
 
@@ -153,41 +255,8 @@ impl IndexerApp {
         }
     }
 
-    fn home_ui(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::top("account_bar").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                match (&self.account, self.account_loading) {
-                    (_, true) => {
-                        ui.spinner();
-                        ui.label("Loading account…");
-                    }
-                    (Some(acct), false) => {
-                        ui.label(format!("Account …{}", last4(&acct.account_number)));
-                        ui.separator();
-                        ui.strong(format!("Cash: {}", money(acct.cash_balance)));
-                    }
-                    (None, false) => {
-                        ui.label("No account loaded");
-                    }
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Log in again").clicked() {
-                        self.screen = Screen::Login(LoginForm::prefilled(None));
-                        return;
-                    }
-                    if ui.add_enabled(!self.account_loading, egui::Button::new("Refresh")).clicked() {
-                        self.load_account();
-                    }
-                });
-            });
-            if let Some(err) = &self.account_error {
-                ui.colored_label(ui.visuals().error_fg_color, err);
-            }
-        });
-
-        egui::CentralPanel::default().show(ui, |ui| {
-            ui.label("S&P 500 view coming in the next phase.");
-        });
+    pub(crate) fn relogin(&mut self) {
+        self.screen = Screen::Login(LoginForm::prefilled(None));
     }
 }
 
@@ -211,15 +280,15 @@ impl eframe::App for IndexerApp {
     }
 }
 
-fn last4(s: &str) -> &str {
-    &s[s.len().saturating_sub(4)..]
-}
-
 /// `$1,234,567.89` style formatting.
 pub fn money(v: f64) -> String {
     let neg = v < 0.0;
     let cents = format!("{:.2}", v.abs());
     let (int, frac) = cents.split_once('.').unwrap_or((&cents, "00"));
+    format!("{}${}.{}", if neg { "-" } else { "" }, group_thousands(int), frac)
+}
+
+pub fn group_thousands(int: &str) -> String {
     let mut grouped = String::new();
     for (i, c) in int.chars().enumerate() {
         if i > 0 && (int.len() - i) % 3 == 0 {
@@ -227,5 +296,5 @@ pub fn money(v: f64) -> String {
         }
         grouped.push(c);
     }
-    format!("{}${}.{}", if neg { "-" } else { "" }, grouped, frac)
+    grouped
 }

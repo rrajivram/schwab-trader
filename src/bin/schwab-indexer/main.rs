@@ -4,6 +4,7 @@
 use eframe::egui;
 
 mod app;
+mod home;
 mod worker;
 
 fn main() -> eframe::Result {
