@@ -54,7 +54,13 @@ fn save_cache(cached: &CachedHoldings) -> Result<()> {
 /// `fetch_error` set) if the live fetch fails. Only errors if there is
 /// neither a usable cache nor a successful live fetch.
 pub async fn get_holdings(entry: &RegistryEntry) -> Result<CachedHoldings> {
-    if let Some(cached) = load_cache(&entry.name) {
+    get_holdings_with(entry, false).await
+}
+
+/// `force` skips the fresh-cache shortcut (a user-requested refresh), but
+/// still falls back to the stale cache if the live fetch fails.
+pub async fn get_holdings_with(entry: &RegistryEntry, force: bool) -> Result<CachedHoldings> {
+    if let Some(cached) = load_cache(&entry.name).filter(|_| !force) {
         let age = Utc::now() - cached.as_of;
         if age < chrono::Duration::hours(CACHE_TTL_HOURS) && cached.fetch_error.is_none() {
             return Ok(cached);

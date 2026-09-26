@@ -185,3 +185,86 @@ fn print_quote(symbol: &str, entry: &Value) {
         println!("52W Range:  ${:.4} - ${:.4}", lo52, hi52);
     }
 }
+
+/// Per-symbol quote + fundamentals for the indexer's S&P 500 table.
+#[derive(Debug, Clone, Default)]
+pub struct MarketData {
+    pub description: Option<String>,
+    /// `lastPrice`, falling back to `closePrice` when zero/missing.
+    pub price: Option<f64>,
+    pub net_percent_change: Option<f64>,
+    pub w52_high: Option<f64>,
+    pub w52_low: Option<f64>,
+    pub eps: Option<f64>,
+    pub pe_ratio: Option<f64>,
+    /// Percent, as Schwab reports it (1.25 = 1.25%).
+    pub div_yield: Option<f64>,
+    /// Annual dividend per share.
+    pub div_amount: Option<f64>,
+    /// Payments per year (4 = quarterly).
+    pub div_freq: Option<u32>,
+    pub volume: Option<u64>,
+    pub avg_volume_10d: Option<f64>,
+}
+
+/// Fetch `MarketData` for any number of symbols, chunked under Schwab's
+/// per-request limit. Symbols Schwab doesn't recognize are simply absent.
+/// Results are keyed by the symbols as passed in: dotted class tickers
+/// (`BRK.B`) are requested in Schwab's slash form (`BRK/B`) and mapped back.
+pub async fn fetch_market_data(token: &str, symbols: &[String]) -> Result<HashMap<String, MarketData>> {
+    let schwab_form: HashMap<String, &String> = symbols.iter().map(|s| (s.replace('.', "/"), s)).collect();
+    let requested: Vec<String> = schwab_form.keys().cloned().collect();
+
+    let mut out = HashMap::new();
+    for chunk in requested.chunks(MAX_SYMBOLS_PER_QUOTE_REQUEST) {
+        let resp = reqwest::Client::new()
+            .get(QUOTES_URL)
+            .header("Authorization", format!("Bearer {}", token))
+            .query(&[
+                ("symbols", chunk.join(",").as_str()),
+                ("fields", "quote,fundamental,reference"),
+                ("indicative", "false"),
+            ])
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            bail!("market data quotes failed ({}): {}", status, body);
+        }
+
+        let data: HashMap<String, Value> = resp.json().await?;
+        for (sym, entry) in data {
+            // Unknown symbols come back under an "errors" key, not per-symbol.
+            if entry.get("quote").is_none() {
+                continue;
+            }
+            let key = schwab_form.get(&sym).map(|s| s.to_string()).unwrap_or(sym);
+            out.insert(key, parse_market_data(&entry));
+        }
+    }
+    Ok(out)
+}
+
+fn parse_market_data(entry: &Value) -> MarketData {
+    let q = &entry["quote"];
+    let f = &entry["fundamental"];
+    let r = &entry["reference"];
+    let fv = |obj: &Value, k: &str| obj[k].as_f64();
+
+    MarketData {
+        description: r["description"].as_str().map(str::to_string),
+        price: fv(q, "lastPrice").filter(|&p| p > 0.0).or_else(|| fv(q, "closePrice")),
+        net_percent_change: fv(q, "netPercentChange"),
+        w52_high: fv(q, "52WeekHigh"),
+        w52_low: fv(q, "52WeekLow"),
+        eps: fv(f, "eps"),
+        pe_ratio: fv(f, "peRatio"),
+        div_yield: fv(f, "divYield"),
+        div_amount: fv(f, "divAmount"),
+        div_freq: f["divFreq"].as_u64().map(|v| v as u32),
+        volume: q["totalVolume"].as_u64(),
+        avg_volume_10d: fv(f, "avg10DaysVolume"),
+    }
+}

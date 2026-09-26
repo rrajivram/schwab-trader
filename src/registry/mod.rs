@@ -1,7 +1,7 @@
 mod entry;
 pub mod holdings;
 pub use entry::{HoldingsProvider, RegistryEntry};
-pub use holdings::get_holdings;
+pub use holdings::{get_holdings, get_holdings_with};
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
