@@ -7,7 +7,7 @@ use eframe::egui::{self, Color32, RichText};
 use egui_extras::{Column, TableBuilder};
 use schwab::{api::MarketData, portfolio::Held, universe::Constituent};
 
-use crate::app::{group_thousands, money, IndexerApp};
+use crate::app::{group_thousands, money, ticker_with_name, IndexerApp};
 use crate::modes::{Mode, DISCARD_HINT};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -256,6 +256,7 @@ impl IndexerApp {
     fn dnt_panel(&mut self, ui: &mut egui::Ui) {
         let mut remove = None;
         let mut add = None;
+        let names = self.names(&self.dnt);
         egui::Panel::right("dnt_panel").default_size(220.0).show(ui, |ui| {
             ui.heading("Do not transact");
             ui.label("Never bought or sold by Create/Rebalance.");
@@ -277,7 +278,7 @@ impl IndexerApp {
                         if ui.small_button("✕").on_hover_text("Remove").clicked() {
                             remove = Some(sym.clone());
                         }
-                        ui.monospace(sym);
+                        ticker_with_name(ui, sym, &names[sym]);
                     });
                 }
             });

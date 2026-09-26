@@ -6,7 +6,7 @@ use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 use schwab::basket::{self, Pick};
 
-use crate::app::{money, IndexerApp};
+use crate::app::{money, ticker_and_name, ticker_with_name, IndexerApp};
 use crate::home::fmt_qty;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -77,6 +77,7 @@ impl IndexerApp {
         let mut remove = None;
         let mut auto = false;
         let mut review = false;
+        let names = self.names(&self.basket);
         egui::Panel::right("create_panel").default_size(260.0).show(ui, |ui| {
             ui.heading("Create basket");
             ui.label("Tick “Basket” on any row, or fill automatically.");
@@ -107,7 +108,7 @@ impl IndexerApp {
                         if ui.small_button("✕").clicked() {
                             remove = Some(sym.clone());
                         }
-                        ui.monospace(sym);
+                        ticker_with_name(ui, sym, &names[sym]);
                     });
                 }
             });
@@ -133,6 +134,7 @@ impl IndexerApp {
         let mut remove = None;
         let mut review = false;
         let replacements = self.current_replacements();
+        let names = self.names(self.discards.iter().chain(replacements.iter().map(|p| &p.symbol)));
         egui::Panel::right("rebalance_panel").default_size(300.0).show(ui, |ui| {
             ui.heading("Rebalance");
             ui.label("Tick “Discard” on held stocks that are below purchase price (red rows).");
@@ -143,10 +145,10 @@ impl IndexerApp {
                     if ui.small_button("✕").clicked() {
                         remove = Some(sym.clone());
                     }
-                    ui.monospace(sym);
                     if let Some(h) = self.held.get(sym) {
-                        ui.weak(money(h.market_value));
+                        ui.label(money(h.market_value));
                     }
+                    ticker_with_name(ui, sym, &names[sym]);
                 });
             }
             ui.separator();
@@ -156,7 +158,12 @@ impl IndexerApp {
                 ui.weak("—");
             }
             for (discard, pick) in self.discards.iter().zip(&replacements) {
-                ui.label(format!("{discard} → {} ({}, {:.2}%)", pick.symbol, pick.sector, pick.div_yield));
+                ui.label(format!(
+                    "{} → {}",
+                    ticker_and_name(discard, &names[discard]),
+                    ticker_and_name(&pick.symbol, &names[&pick.symbol])
+                ));
+                ui.weak(format!("      {}, yield {:.2}%", pick.sector, pick.div_yield));
             }
             ui.separator();
             review = ui.add_enabled(!replacements.is_empty(), egui::Button::new("Review →")).clicked();
@@ -222,7 +229,14 @@ impl IndexerApp {
             ui.add_space(6.0);
 
             if review.rebalance {
-                let sold: Vec<String> = review.sells.iter().map(|(s, v)| format!("{s} {}", money(*v))).collect();
+                let sold: Vec<String> = review
+                    .sells
+                    .iter()
+                    .map(|(s, v)| {
+                        let name = market.get(s).and_then(|m| m.description.as_deref()).unwrap_or("");
+                        format!("{} {}", ticker_and_name(s, name), money(*v))
+                    })
+                    .collect();
                 ui.label(format!("Sell in full: {}", sold.join(", ")));
             }
 
@@ -253,11 +267,12 @@ impl IndexerApp {
                     .vscroll(false)
                     .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                     .column(Column::exact(64.0))
+                    .column(Column::initial(220.0).clip(true))
                     .column(Column::initial(170.0))
                     .columns(Column::initial(84.0), 6)
                     .column(Column::exact(28.0))
                     .header(22.0, |mut h| {
-                        for label in ["Symbol", "Sector", "Div Yld", "Price", "Weight", "Share", "Amount", "Shares", ""] {
+                        for label in ["Symbol", "Company", "Sector", "Div Yld", "Price", "Weight", "Share", "Amount", "Shares", ""] {
                             h.col(|ui| {
                                 ui.strong(label);
                             });
@@ -269,6 +284,10 @@ impl IndexerApp {
                             body.row(22.0, |mut row| {
                                 row.col(|ui| {
                                     ui.monospace(&line.symbol);
+                                });
+                                row.col(|ui| {
+                                    let name = md.and_then(|m| m.description.as_deref()).unwrap_or("");
+                                    ui.label(name).on_hover_text(name);
                                 });
                                 row.col(|ui| {
                                     ui.label(&line.sector);

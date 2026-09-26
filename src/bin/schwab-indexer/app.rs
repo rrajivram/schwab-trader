@@ -153,6 +153,20 @@ impl IndexerApp {
         self.worker.load_market(symbols);
     }
 
+    /// Company names (Schwab's description) for the given tickers; tickers
+    /// without a quote yet get an empty name. Collected up front so panels can
+    /// show names while mutably borrowing other fields.
+    pub(crate) fn names<'a>(&self, symbols: impl IntoIterator<Item = &'a String>) -> HashMap<String, String> {
+        let market = self.market.value.as_ref();
+        symbols
+            .into_iter()
+            .map(|s| {
+                let name = market.and_then(|m| m.get(s)?.description.clone()).unwrap_or_default();
+                (s.clone(), name)
+            })
+            .collect()
+    }
+
     fn rebuild_held(&mut self) {
         let empty = HashMap::new();
         let divs = self.dividends.value.as_ref().unwrap_or(&empty);
@@ -295,6 +309,19 @@ impl eframe::App for IndexerApp {
             Screen::Home => self.home_ui(ui),
         }
     }
+}
+
+/// Ticker in monospace followed by the company name, dimmed and truncated.
+pub fn ticker_with_name(ui: &mut egui::Ui, symbol: &str, name: &str) {
+    ui.monospace(symbol);
+    if !name.is_empty() {
+        ui.add(egui::Label::new(egui::RichText::new(name).weak()).truncate()).on_hover_text(name);
+    }
+}
+
+/// "F (FORD MTR CO DEL)", or just the ticker when the name is unknown.
+pub fn ticker_and_name(symbol: &str, name: &str) -> String {
+    if name.is_empty() { symbol.to_string() } else { format!("{symbol} ({name})") }
 }
 
 /// `$1,234,567.89` style formatting.
