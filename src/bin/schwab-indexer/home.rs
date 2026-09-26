@@ -322,7 +322,7 @@ impl IndexerApp {
         let market = self.market.value.as_ref().unwrap_or(&empty);
         let mut actions = Vec::new();
 
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
             for (sector, sector_weight) in universe.sectors_by_weight() {
                 let mut rows: Vec<Row> = universe
                     .constituents

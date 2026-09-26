@@ -77,6 +77,23 @@ impl IndexerApp {
         self.dnt.iter().cloned().chain(self.held.keys().cloned()).collect()
     }
 
+    /// Stocks failing the Max P/E filter: P/E above the limit, or no
+    /// positive P/E at all (unknown, or losses make it meaningless).
+    fn pe_exclusions(&self) -> HashSet<String> {
+        if !self.max_pe_enabled {
+            return HashSet::new();
+        }
+        let (Some(u), Some(market)) = (&self.universe.value, &self.market.value) else { return HashSet::new() };
+        u.constituents
+            .iter()
+            .filter(|c| {
+                let pe = market.get(&c.symbol).and_then(|m| m.pe_ratio);
+                !pe.is_some_and(|pe| pe > 0.0 && pe <= self.max_pe)
+            })
+            .map(|c| c.symbol.clone())
+            .collect()
+    }
+
     fn discard_value(&self) -> f64 {
         self.discards.iter().filter_map(|s| self.held.get(s)).map(|h| h.market_value).sum()
     }
@@ -93,6 +110,7 @@ impl IndexerApp {
         let mut auto = false;
         let mut review = false;
         let names = self.names(&self.basket);
+        let pe_passing = self.universe.value.as_ref().map_or(0, |u| u.constituents.len()) - self.pe_exclusions().len();
         egui::Panel::right("create_panel").default_size(260.0).show(ui, |ui| {
             ui.heading("Create basket");
             ui.label("Tick “Basket” on any row, or fill automatically.");
@@ -101,6 +119,14 @@ impl IndexerApp {
                 ui.label("Auto size");
                 ui.add(egui::DragValue::new(&mut self.auto_size).range(1..=500).suffix(" stocks"));
             });
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.max_pe_enabled, "Max P/E")
+                    .on_hover_text("Only pick stocks with a positive P/E at or below this. Stocks with no P/E (e.g. losses) are skipped.");
+                ui.add_enabled(self.max_pe_enabled, egui::DragValue::new(&mut self.max_pe).range(1.0..=500.0).speed(0.5).max_decimals(1));
+            });
+            if self.max_pe_enabled {
+                ui.weak(format!("{pe_passing} S&P 500 stocks pass (before other exclusions)"));
+            }
             let ready = self.market.value.is_some();
             auto = ui
                 .add_enabled(ready, egui::Button::new("Auto fill"))
@@ -110,6 +136,9 @@ impl IndexerApp {
                 )
                 .on_disabled_hover_text("Waiting for quotes")
                 .clicked();
+            if let Some(note) = &self.auto_note {
+                ui.colored_label(ui.visuals().warn_fg_color, note);
+            }
             ui.separator();
             ui.horizontal(|ui| {
                 ui.strong(format!("Basket ({})", self.basket.len()));
@@ -136,7 +165,11 @@ impl IndexerApp {
         }
         if auto {
             if let Some(u) = &self.universe.value {
-                let picks = basket::auto_basket(u, &self.yields(), &self.auto_exclusions(), self.auto_size);
+                let mut exclude = self.auto_exclusions();
+                exclude.extend(self.pe_exclusions());
+                let picks = basket::auto_basket(u, &self.yields(), &exclude, self.auto_size);
+                self.auto_note = (picks.len() < self.auto_size)
+                    .then(|| format!("Only {} stocks qualify — basket has {}.", picks.len(), picks.len()));
                 self.basket = picks.into_iter().map(|p| p.symbol).collect();
             }
         }

@@ -93,6 +93,11 @@ pub struct IndexerApp {
     /// Create mode: chosen symbols, in the order added.
     pub(crate) basket: Vec<String>,
     pub(crate) auto_size: usize,
+    /// Auto fill only picks stocks with 0 < P/E ≤ `max_pe` when enabled.
+    pub(crate) max_pe_enabled: bool,
+    pub(crate) max_pe: f64,
+    /// Result message from the last Auto fill (e.g. fewer stocks than asked).
+    pub(crate) auto_note: Option<String>,
     /// Rebalance mode: held symbols to sell, in the order ticked.
     pub(crate) discards: Vec<String>,
     pub(crate) review: Option<Review>,
@@ -123,6 +128,9 @@ impl IndexerApp {
             mode: Mode::Browse,
             basket: Vec::new(),
             auto_size: 20,
+            max_pe_enabled: false,
+            max_pe: 25.0,
+            auto_note: None,
             discards: Vec::new(),
             review: None,
             exec: None,
