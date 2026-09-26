@@ -117,8 +117,13 @@ pub fn install(ctx: &egui::Context) {
     for (name, bytes) in faces {
         fonts.font_data.insert(name.into(), Arc::new(FontData::from_static(bytes)));
     }
+    // Public Sans lacks ✓ → ←; IBM Plex Mono has them, so it backs up the
+    // sans families before egui's own fonts.
     let family = |primary: &str| {
         let mut v = vec![primary.to_string()];
+        if !primary.starts_with("IBMPlexMono") {
+            v.push("IBMPlexMono-Regular".to_string());
+        }
         v.extend(fallbacks.iter().cloned());
         v
     };
@@ -257,27 +262,52 @@ pub fn stat(ui: &mut egui::Ui, label: &str, value: &str, color: Option<Color32>)
     });
 }
 
-/// A clickable column header that looks clickable: faint ⇅ when sortable,
-/// accent ▲/▼ when it's the active sort, hover highlight and tooltip.
-/// `active` is Some(ascending) for the sorted column.
+/// A clickable column header that looks clickable: a stacked pair of
+/// triangles (both faint when sortable, the active one in the accent color
+/// when sorted), pointer cursor, underline on hover, and a tooltip.
+/// `active` is Some(ascending) for the sorted column. The triangles are
+/// painted rather than typed: none of the bundled fonts has ▲ ▼ ⇅.
 pub fn sort_header(ui: &mut egui::Ui, label: &str, active: Option<bool>, hint: &str) -> bool {
     let p = pal(ui);
-    let (arrow, color) = match active {
-        Some(true) => ("▲", p.accent),
-        Some(false) => ("▼", p.accent),
-        None => ("⇅", p.muted),
-    };
-    let mut job = egui::text::LayoutJob::default();
     let label_color = if active.is_some() { p.accent } else { p.ink };
-    job.append(label, 0.0, egui::TextFormat::simple(sans_semibold(SMALL + 0.5), label_color));
-    job.append(arrow, 4.0, egui::TextFormat::simple(sans(SMALL), color));
+    let inner = ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 5.0;
+        let text = ui.add(egui::Label::new(RichText::new(label).font(sans_semibold(SMALL + 0.5)).color(label_color)).selectable(false));
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(7.0, 12.0), Sense::hover());
+        (text.rect, rect)
+    });
+    let (text_rect, arrows) = inner.inner;
     let resp = ui
-        .add(egui::Button::new(job).frame_when_inactive(false).min_size(Vec2::new(0.0, 22.0)))
+        .interact(inner.response.rect, ui.id().with(("sort", label)), Sense::click())
         .on_hover_cursor(CursorIcon::PointingHand);
+
+    let faint = p.muted.gamma_multiply(0.45);
+    let (up, down) = match active {
+        Some(true) => (p.accent, Color32::TRANSPARENT),
+        Some(false) => (Color32::TRANSPARENT, p.accent),
+        None => (faint, faint),
+    };
+    let c = arrows.center();
+    let painter = ui.painter();
+    painter.add(egui::Shape::convex_polygon(
+        vec![egui::pos2(c.x, c.y - 5.5), egui::pos2(c.x + 3.5, c.y - 1.0), egui::pos2(c.x - 3.5, c.y - 1.0)],
+        up,
+        Stroke::NONE,
+    ));
+    painter.add(egui::Shape::convex_polygon(
+        vec![egui::pos2(c.x - 3.5, c.y + 1.0), egui::pos2(c.x + 3.5, c.y + 1.0), egui::pos2(c.x, c.y + 5.5)],
+        down,
+        Stroke::NONE,
+    ));
+    if resp.hovered() {
+        let y = text_rect.bottom() + 1.0;
+        painter.line_segment([egui::pos2(text_rect.left(), y), egui::pos2(text_rect.right(), y)], Stroke::new(1.0, label_color));
+    }
+
     let tip = match active {
         Some(true) => format!("Sorted by {label}, low to high. Click to reverse."),
         Some(false) => format!("Sorted by {label}, high to low. Click to reverse."),
-        None => format!("Sort by {label}"),
+        None => format!("Click to sort by {label}"),
     };
     let tip = if hint.is_empty() { tip } else { format!("{hint}\n{tip}") };
     resp.on_hover_text(tip).clicked()

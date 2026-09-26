@@ -41,7 +41,7 @@ pub struct Review {
 }
 
 /// Review table headers; all but the trailing remove-button column sort.
-const REVIEW_COLUMNS: [&str; 10] = ["Symbol", "Company", "Sector", "Div Yld", "Price", "Weight", "Share", "Amount", "Shares", ""];
+const REVIEW_COLUMNS: [&str; 11] = ["Symbol", "Company", "Sector", "Div Yld", "P/E", "Price", "Weight", "Share", "Amount", "Shares", ""];
 /// Columns 0..TEXT_COLUMNS sort alphabetically, the rest numerically.
 const TEXT_COLUMNS: usize = 3;
 
@@ -391,7 +391,7 @@ impl IndexerApp {
                         .column(Column::exact(72.0))
                         .column(Column::initial(230.0).clip(true))
                         .column(Column::initial(170.0))
-                        .columns(Column::initial(90.0), 6)
+                        .columns(Column::initial(90.0), 7)
                         .column(Column::exact(80.0))
                         .header(26.0, |mut h| {
                             for (i, label) in REVIEW_COLUMNS.iter().enumerate() {
@@ -428,6 +428,9 @@ impl IndexerApp {
                                     });
                                     row.col(|ui| {
                                         right(ui, fig(md.and_then(|m| m.div_yield).map(|y| format!("{y:.2}%")).unwrap_or("—".into())));
+                                    });
+                                    row.col(|ui| {
+                                        right(ui, fig(md.and_then(|m| m.pe_ratio).map(|v| format!("{v:.1}")).unwrap_or("—".into())));
                                     });
                                     row.col(|ui| {
                                         right(ui, fig(prices[i].map(|p| format!("{p:.2}")).unwrap_or("—".into())));
@@ -535,6 +538,7 @@ fn sort_lines(lines: &mut [Line], market: &HashMap<String, MarketData>, (col, as
     let num = |l: &Line| -> Option<f64> {
         match REVIEW_COLUMNS[col] {
             "Div Yld" => market.get(&l.symbol).and_then(|m| m.div_yield),
+            "P/E" => market.get(&l.symbol).and_then(|m| m.pe_ratio),
             "Price" => price(l),
             "Weight" | "Share" | "Amount" => Some(l.weight_pct),
             "Shares" => price(l).filter(|p| *p > 0.0).map(|p| l.weight_pct / p),
