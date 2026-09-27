@@ -67,6 +67,8 @@ struct Row<'a> {
     /// Ticked in the mode's selection column (Basket / Discard).
     selected: bool,
     selectable: bool,
+    /// Alpha Vantage's readable name when cached, else Schwab's description.
+    name: &'a str,
 }
 
 impl Row<'_> {
@@ -90,7 +92,7 @@ impl Row<'_> {
     }
 
     fn name(&self) -> &str {
-        self.md.and_then(|m| m.description.as_deref()).unwrap_or("")
+        self.name
     }
 }
 
@@ -134,6 +136,7 @@ enum Action {
 impl IndexerApp {
     pub(crate) fn home_ui(&mut self, ui: &mut egui::Ui) {
         self.top_bar(ui);
+        self.settings_modal(ui);
         match self.mode {
             Mode::Review => return self.review_ui(ui),
             Mode::Execute => return self.execute_ui(ui),
@@ -170,6 +173,10 @@ impl IndexerApp {
                     if ui.button("Log in again").clicked() {
                         self.relogin();
                     }
+                    if ui.button("Settings").clicked() {
+                        let key = schwab::config::Config::load().ok().and_then(|c| c.alphavantage_key).unwrap_or_default();
+                        self.settings = Some(crate::app::SettingsForm { av_key: key, saved: false });
+                    }
                     let busy = self.account.loading || self.market.loading || self.universe.loading;
                     let locked = self.mode == Mode::Execute;
                     if ui
@@ -192,6 +199,47 @@ impl IndexerApp {
                 });
             });
         });
+    }
+
+    fn settings_modal(&mut self, ui: &mut egui::Ui) {
+        let Some(form) = &mut self.settings else { return };
+        let p = pal(ui);
+        let mut close = false;
+        let used = self.av_used_today;
+        let resp = egui::Modal::new(egui::Id::new("settings")).show(ui.ctx(), |ui| {
+            ui.set_width(440.0);
+            ui.label(RichText::new("Settings").font(theme::sans_semibold(theme::HEADING)));
+            ui.add_space(10.0);
+            ui.label(theme::eyebrow(ui, "Alpha Vantage API key"));
+            ui.label(RichText::new("Used for forward P/E, analyst targets and ratings, and company names in Review. Saved on this Mac only.").color(p.muted));
+            ui.add(egui::TextEdit::singleline(&mut form.av_key).password(true).desired_width(f32::INFINITY));
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!("{used} of {} free requests used today", schwab::alphavantage::DAILY_LIMIT))
+                        .color(p.muted)
+                        .font(theme::sans(theme::SMALL)),
+                );
+                ui.hyperlink_to(RichText::new("Get a key").font(theme::sans(theme::SMALL)), "https://www.alphavantage.co/support/#api-key");
+            });
+            if form.saved {
+                ui.label(RichText::new("Saved").color(p.gain));
+            }
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                close = ui.button("Close").clicked();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add(theme::primary(ui, "Save")).clicked() {
+                        let mut cfg = schwab::config::Config::load().unwrap_or_default();
+                        let key = form.av_key.trim().to_string();
+                        cfg.alphavantage_key = (!key.is_empty()).then_some(key);
+                        form.saved = cfg.save().is_ok();
+                    }
+                });
+            });
+        });
+        if close || resp.should_close() {
+            self.settings = None;
+        }
     }
 
     /// Browse | Create | Rebalance, as one segmented control.
@@ -381,7 +429,14 @@ impl IndexerApp {
                             ),
                             Mode::Browse | Mode::Review | Mode::Execute => (false, false),
                         };
-                        Row { c, md: market.get(&c.symbol), held, dnt, selected, selectable }
+                        let md = market.get(&c.symbol);
+                        let name = self
+                            .overviews
+                            .get(&c.symbol)
+                            .and_then(|o| o.name.as_deref())
+                            .or_else(|| md.and_then(|m| m.description.as_deref()))
+                            .unwrap_or("");
+                        Row { c, md, held, dnt, selected, selectable, name }
                     })
                     .collect();
                 let sort = self.sort.get(sector).copied().unwrap_or_default();

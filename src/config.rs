@@ -15,6 +15,9 @@ pub struct Config {
     /// Schwab's encrypted account hash for the account picked in AccountSelect,
     /// remembered so repeat launches don't force re-selection.
     pub selected_account_hash: Option<String>,
+    /// Alpha Vantage API key (forward P/E, analyst data) for schwab-indexer.
+    #[serde(default)]
+    pub alphavantage_key: Option<String>,
 }
 
 fn default_redirect_uri() -> String {
@@ -31,6 +34,7 @@ impl Default for Config {
             refresh_token: None,
             token_expiry: None,
             selected_account_hash: None,
+            alphavantage_key: None,
         }
     }
 }

@@ -2,6 +2,7 @@
 //! `schwab-indexer` (egui basket builder).
 
 pub mod accounts;
+pub mod alphavantage;
 pub mod api;
 pub mod auth;
 pub mod basket;

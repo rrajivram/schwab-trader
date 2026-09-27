@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use eframe::egui::{self, RichText};
 use egui_extras::{Column, TableBuilder};
+use schwab::alphavantage::Overview;
 use schwab::api::MarketData;
 use schwab::basket::{self, Pick};
 use schwab::execution::PlannedOrder;
@@ -41,7 +42,10 @@ pub struct Review {
 }
 
 /// Review table headers; all but the trailing remove-button column sort.
-const REVIEW_COLUMNS: [&str; 11] = ["Symbol", "Company", "Sector", "Div Yld", "P/E", "Price", "Weight", "Share", "Amount", "Shares", ""];
+const REVIEW_COLUMNS: [&str; 15] = [
+    "Symbol", "Company", "Sector", "Div Yld", "P/E", "Fwd P/E", "Target", "Upside", "Analysts", "Price", "Weight", "Share",
+    "Amount", "Shares", "",
+];
 /// Columns 0..TEXT_COLUMNS sort alphabetically, the rest numerically.
 const TEXT_COLUMNS: usize = 3;
 
@@ -281,6 +285,8 @@ impl IndexerApp {
             confirm: None,
         });
         self.mode = Mode::Review;
+        let symbols = self.review.as_ref().map(|r| r.lines.iter().map(|l| l.symbol.clone()).collect()).unwrap_or_default();
+        self.fetch_overviews(symbols);
     }
 
     pub(crate) fn review_ui(&mut self, ui: &mut egui::Ui) {
@@ -290,6 +296,11 @@ impl IndexerApp {
         };
         let p = pal(ui);
         let market = self.market.value.clone().unwrap_or_default();
+        let symbols: Vec<String> = review.lines.iter().map(|l| l.symbol.clone()).collect();
+        let names = self.names(&symbols);
+        let overviews: HashMap<String, Overview> =
+            symbols.iter().filter_map(|s| Some((s.clone(), self.overviews.get(s)?.clone()))).collect();
+        let (av_running, av_used, av_notes) = (self.av_running, self.av_used_today, self.av_notes.clone());
         let mut back = false;
         let mut add = None;
         let mut planned_buys = Vec::new();
@@ -302,7 +313,7 @@ impl IndexerApp {
             // would be unusable.
             let editing = ui.ctx().egui_is_using_pointer() || ui.ctx().memory(|m| m.focused().is_some());
             if let (Some(sort), false) = (review.sort, editing) {
-                sort_lines(&mut review.lines, &market, sort);
+                sort_lines(&mut review.lines, &market, &overviews, &names, sort);
             }
             let weights: Vec<f64> = review.lines.iter().map(|l| l.weight_pct).collect();
             let prices: Vec<Option<f64>> = review.lines.iter().map(|l| market.get(&l.symbol).and_then(|m| m.price)).collect();
@@ -378,6 +389,23 @@ impl IndexerApp {
             });
             ui.add_space(10.0);
 
+            ui.horizontal_wrapped(|ui| {
+                ui.label(theme::eyebrow(ui, "Analyst data · Alpha Vantage"));
+                let loaded = review.lines.iter().filter(|l| overviews.contains_key(&l.symbol)).count();
+                ui.label(RichText::new(format!("{loaded} of {} loaded", review.lines.len())).color(p.muted));
+                if av_running {
+                    ui.spinner();
+                }
+                ui.label(
+                    RichText::new(format!("· {av_used} of {} requests used today", schwab::alphavantage::DAILY_LIMIT))
+                        .color(p.muted),
+                );
+                for n in &av_notes {
+                    ui.label(RichText::new(n).color(p.warn));
+                }
+            });
+            ui.add_space(4.0);
+
             let mut remove = None;
             let mut clicked_col = None;
             let sort = review.sort;
@@ -391,7 +419,9 @@ impl IndexerApp {
                         .column(Column::exact(72.0))
                         .column(Column::initial(230.0).clip(true))
                         .column(Column::initial(170.0))
-                        .columns(Column::initial(90.0), 7)
+                        .columns(Column::initial(76.0), 5)
+                        .column(Column::initial(100.0))
+                        .columns(Column::initial(88.0), 5)
                         .column(Column::exact(80.0))
                         .header(26.0, |mut h| {
                             for (i, label) in REVIEW_COLUMNS.iter().enumerate() {
@@ -403,6 +433,10 @@ impl IndexerApp {
                                     let hint = match *label {
                                         "Weight" => "Your relative weight. Drag or type to change it.",
                                         "Share" => "Weight rescaled so the basket totals 100%",
+                                        "Fwd P/E" => "Price ÷ analysts' expected earnings (Alpha Vantage)",
+                                        "Target" => "Average analyst 12-month price target",
+                                        "Upside" => "Target vs. current price",
+                                        "Analysts" => "Share of analysts rating it Buy or Strong Buy",
                                         _ => "",
                                     };
                                     if theme::sort_header(ui, label, active, hint) {
@@ -420,7 +454,7 @@ impl IndexerApp {
                                         ui.label(RichText::new(&line.symbol).font(theme::mono_semibold(13.0)));
                                     });
                                     row.col(|ui| {
-                                        let name = md.and_then(|m| m.description.as_deref()).unwrap_or("");
+                                        let name = &names[&line.symbol];
                                         ui.label(name).on_hover_text(name);
                                     });
                                     row.col(|ui| {
@@ -431,6 +465,34 @@ impl IndexerApp {
                                     });
                                     row.col(|ui| {
                                         right(ui, fig(md.and_then(|m| m.pe_ratio).map(|v| format!("{v:.1}")).unwrap_or("—".into())));
+                                    });
+                                    let ov = overviews.get(&line.symbol);
+                                    // "…" while it may still arrive, "—" once fetched without a value.
+                                    let blank = if ov.is_none() && av_running { "…" } else { "—" };
+                                    row.col(|ui| {
+                                        right(ui, fig(ov.and_then(|o| o.forward_pe).map(|v| format!("{v:.1}")).unwrap_or(blank.into())));
+                                    });
+                                    row.col(|ui| {
+                                        right(ui, fig(ov.and_then(|o| o.target_price).map(|v| format!("{v:.2}")).unwrap_or(blank.into())));
+                                    });
+                                    row.col(|ui| {
+                                        match upside(ov, prices[i]) {
+                                            Some(u) => right(ui, RichText::new(format!("{:+.1}%", u * 100.0)).font(theme::mono(12.5)).color(if u >= 0.0 { p.gain } else { p.loss })),
+                                            None => right(ui, fig(blank.into())),
+                                        }
+                                    });
+                                    row.col(|ui| match ov {
+                                        Some(o) if o.analyst_count() > 0 => {
+                                            let share = o.buy_share().unwrap_or(0.0);
+                                            let tone = if share >= 0.6 { Tone::Gain } else if share >= 0.35 { Tone::Warn } else { Tone::Loss };
+                                            theme::tone_pill(ui, &format!("{:.0}% buy", share * 100.0), tone).on_hover_text(format!(
+                                                "{} analysts\nStrong buy {} · Buy {} · Hold {} · Sell {} · Strong sell {}",
+                                                o.analyst_count(), o.strong_buy, o.buy, o.hold, o.sell, o.strong_sell
+                                            ));
+                                        }
+                                        _ => {
+                                            ui.label(RichText::new(blank).color(p.muted));
+                                        }
                                     });
                                     row.col(|ui| {
                                         right(ui, fig(prices[i].map(|p| format!("{p:.2}")).unwrap_or("—".into())));
@@ -497,6 +559,9 @@ impl IndexerApp {
             review.message = self.add_line(&mut review, &sym).err();
             if review.message.is_none() {
                 review.add_input.clear();
+                if let Some(l) = review.lines.last() {
+                    self.fetch_overviews(vec![l.symbol.clone()]);
+                }
             }
         }
 
@@ -530,8 +595,21 @@ impl IndexerApp {
     }
 }
 
-fn sort_lines(lines: &mut [Line], market: &HashMap<String, MarketData>, (col, ascending): (usize, bool)) {
-    let name = |l: &Line| market.get(&l.symbol).and_then(|m| m.description.clone()).unwrap_or_default();
+/// Analyst target vs. current price (0.1 = 10% upside).
+fn upside(ov: Option<&Overview>, price: Option<f64>) -> Option<f64> {
+    let (t, p) = (ov?.target_price?, price?);
+    (p > 0.0).then(|| t / p - 1.0)
+}
+
+fn sort_lines(
+    lines: &mut [Line],
+    market: &HashMap<String, MarketData>,
+    overviews: &HashMap<String, Overview>,
+    names: &HashMap<String, String>,
+    (col, ascending): (usize, bool),
+) {
+    let name = |l: &Line| names.get(&l.symbol).cloned().unwrap_or_default();
+    let ov = |l: &Line| overviews.get(&l.symbol);
     let price = |l: &Line| market.get(&l.symbol).and_then(|m| m.price);
     // Share and Amount are proportional to Weight, and Shares to Weight/Price,
     // so no need to compute the allocation to order by them.
@@ -539,6 +617,10 @@ fn sort_lines(lines: &mut [Line], market: &HashMap<String, MarketData>, (col, as
         match REVIEW_COLUMNS[col] {
             "Div Yld" => market.get(&l.symbol).and_then(|m| m.div_yield),
             "P/E" => market.get(&l.symbol).and_then(|m| m.pe_ratio),
+            "Fwd P/E" => ov(l).and_then(|o| o.forward_pe),
+            "Target" => ov(l).and_then(|o| o.target_price),
+            "Upside" => upside(ov(l), price(l)),
+            "Analysts" => ov(l).and_then(Overview::buy_share),
             "Price" => price(l),
             "Weight" | "Share" | "Amount" => Some(l.weight_pct),
             "Shares" => price(l).filter(|p| *p > 0.0).map(|p| l.weight_pct / p),

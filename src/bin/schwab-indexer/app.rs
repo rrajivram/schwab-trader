@@ -103,12 +103,26 @@ pub struct IndexerApp {
     pub(crate) discards: Vec<String>,
     pub(crate) review: Option<Review>,
     pub(crate) exec: Option<Execution>,
+    /// Alpha Vantage overviews by symbol (disk cache + this session's fetches).
+    pub(crate) overviews: HashMap<String, schwab::alphavantage::Overview>,
+    pub(crate) av_running: bool,
+    /// Symbols requested while a run was in progress; fetched next.
+    pub(crate) av_pending: Vec<String>,
+    pub(crate) av_notes: Vec<String>,
+    pub(crate) av_used_today: u32,
+    pub(crate) settings: Option<SettingsForm>,
+}
+
+pub struct SettingsForm {
+    pub av_key: String,
+    pub saved: bool,
 }
 
 impl IndexerApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let worker = Worker::new(cc.egui_ctx.clone());
         worker.check_token();
+        let av_cache = schwab::alphavantage::Cache::load();
         let (dnt, dnt_error) = match blacklist::load() {
             Ok(v) => (v.into_iter().collect(), None),
             Err(e) => (BTreeSet::new(), Some(format!("Could not read do-not-transact list: {e}"))),
@@ -135,6 +149,12 @@ impl IndexerApp {
             discards: Vec::new(),
             review: None,
             exec: None,
+            overviews: av_cache.overviews.clone(),
+            av_running: false,
+            av_pending: Vec::new(),
+            av_notes: Vec::new(),
+            av_used_today: av_cache.used_today(),
+            settings: None,
         }
     }
 
@@ -165,18 +185,42 @@ impl IndexerApp {
         self.worker.load_market(symbols);
     }
 
-    /// Company names (Schwab's description) for the given tickers; tickers
-    /// without a quote yet get an empty name. Collected up front so panels can
-    /// show names while mutably borrowing other fields.
+    /// Company name: Alpha Vantage's readable one when cached, otherwise
+    /// Schwab's description, otherwise empty.
+    pub(crate) fn display_name(&self, symbol: &str) -> String {
+        self.overviews
+            .get(symbol)
+            .and_then(|o| o.name.clone())
+            .or_else(|| self.market.value.as_ref()?.get(symbol)?.description.clone())
+            .unwrap_or_default()
+    }
+
+    /// Names for the given tickers, collected up front so panels can show
+    /// them while mutably borrowing other fields.
     pub(crate) fn names<'a>(&self, symbols: impl IntoIterator<Item = &'a String>) -> HashMap<String, String> {
-        let market = self.market.value.as_ref();
-        symbols
+        symbols.into_iter().map(|s| (s.clone(), self.display_name(s))).collect()
+    }
+
+    /// Queue Alpha Vantage lookups for symbols without fresh cached data.
+    pub(crate) fn fetch_overviews(&mut self, symbols: Vec<String>) {
+        let needed: Vec<String> = symbols
             .into_iter()
-            .map(|s| {
-                let name = market.and_then(|m| m.get(s)?.description.clone()).unwrap_or_default();
-                (s.clone(), name)
-            })
-            .collect()
+            .filter(|s| !self.overviews.get(s).is_some_and(|o| o.is_fresh()))
+            .collect();
+        if needed.is_empty() {
+            return;
+        }
+        if self.av_running {
+            self.av_pending.extend(needed);
+            return;
+        }
+        let Some(key) = Config::load().ok().and_then(|c| c.alphavantage_key).filter(|k| !k.trim().is_empty()) else {
+            self.av_notes = vec!["Add an Alpha Vantage key in Settings to load forward P/E and analyst data.".into()];
+            return;
+        };
+        self.av_notes.clear();
+        self.av_running = true;
+        self.worker.load_overviews(key, needed);
     }
 
     fn rebuild_held(&mut self) {
@@ -245,6 +289,16 @@ impl IndexerApp {
             }
             Msg::MarketLoaded(result) => self.market.finish(result),
             Msg::Exec(ev) => self.handle_exec(ev),
+            Msg::Overview(sym, o) => {
+                self.overviews.insert(sym, o);
+            }
+            Msg::OverviewNote(n) => self.av_notes.push(n),
+            Msg::OverviewsDone(used) => {
+                self.av_running = false;
+                self.av_used_today = used;
+                let pending = std::mem::take(&mut self.av_pending);
+                self.fetch_overviews(pending);
+            }
         }
     }
 

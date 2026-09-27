@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use schwab::{accounts, api, auth, dividends, execution, universe};
+use schwab::{accounts, alphavantage, api, auth, dividends, execution, universe};
 
 pub enum Msg {
     /// Startup token check: Ok means a usable (possibly refreshed) token exists.
@@ -22,6 +22,12 @@ pub enum Msg {
     DividendsLoaded(Result<HashMap<String, f64>, String>),
     /// Streamed progress from an order run.
     Exec(execution::ExecEvent),
+    /// One symbol's Alpha Vantage overview arrived (already cached to disk).
+    Overview(String, alphavantage::Overview),
+    /// Something worth telling the user about the Alpha Vantage run.
+    OverviewNote(String),
+    /// Run finished; carries requests used today.
+    OverviewsDone(u32),
 }
 
 pub struct Worker {
@@ -121,6 +127,54 @@ impl Worker {
                 ctx.request_repaint();
             })
             .await;
+        });
+    }
+
+    /// Fetch Alpha Vantage overviews one at a time for symbols not freshly
+    /// cached, stopping at the daily limit. Spaced out to avoid Alpha
+    /// Vantage's burst limit.
+    pub fn load_overviews(&self, api_key: String, symbols: Vec<String>) {
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        self.rt.spawn(async move {
+            let send = |m: Msg| {
+                let _ = tx.send(m);
+                ctx.request_repaint();
+            };
+            let mut cache = alphavantage::Cache::load();
+            let mut first = true;
+            for sym in symbols {
+                if cache.overviews.get(&sym).is_some_and(|o| o.is_fresh()) {
+                    continue;
+                }
+                if cache.remaining_today() == 0 {
+                    send(Msg::OverviewNote(format!(
+                        "Daily limit of {} Alpha Vantage requests reached. The rest load tomorrow.",
+                        alphavantage::DAILY_LIMIT
+                    )));
+                    break;
+                }
+                if !first {
+                    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                }
+                first = false;
+                match alphavantage::fetch_overview(&api_key, &sym, &mut cache).await {
+                    Ok(o) => {
+                        cache.overviews.insert(sym.clone(), o.clone());
+                        send(Msg::Overview(sym, o));
+                    }
+                    Err(alphavantage::FetchError::RateLimited(msg)) => {
+                        let _ = cache.save();
+                        send(Msg::OverviewNote(format!("Alpha Vantage limit reached: {msg}")));
+                        break;
+                    }
+                    Err(alphavantage::FetchError::Other(e)) => {
+                        send(Msg::OverviewNote(format!("{sym}: {e}")));
+                    }
+                }
+                let _ = cache.save();
+            }
+            send(Msg::OverviewsDone(cache.used_today()));
         });
     }
 }

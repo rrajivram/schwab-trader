@@ -87,3 +87,19 @@ async fn preview_order_run_sends_nothing() {
     assert_eq!(previews, 3, "one sell + two buys, all previews");
     assert!(!events.iter().any(|e| matches!(e, ExecEvent::Sell(_, OrderState::Placed { .. }) | ExecEvent::Buy(_, OrderState::Placed { .. }))));
 }
+
+/// One Alpha Vantage request through the app's fetch + daily counter.
+#[tokio::test]
+#[ignore]
+async fn alphavantage_overview_live() {
+    use schwab::{alphavantage, config::Config};
+    let key = Config::load().unwrap().alphavantage_key.expect("alphavantage_key in config");
+    let mut cache = alphavantage::Cache::load();
+    let before = cache.used_today();
+    let o = alphavantage::fetch_overview(&key, "KO", &mut cache).await.map_err(|e| format!("{e:?}")).unwrap();
+    println!("{o:?}");
+    assert_eq!(cache.used_today(), before + 1);
+    assert!(o.forward_pe.is_some() && o.name.is_some());
+    cache.overviews.insert("KO".into(), o);
+    cache.save().unwrap();
+}

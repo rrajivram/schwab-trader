@@ -80,7 +80,7 @@ impl IndexerApp {
                             for o in list.iter() {
                                 side_pill(ui, side);
                                 ui.label(RichText::new(&o.symbol).font(theme::mono_semibold(theme::BODY)));
-                                let name = market.get(&o.symbol).and_then(|m| m.description.as_deref()).unwrap_or("");
+                                let name = self.display_name(&o.symbol);
                                 ui.add(egui::Label::new(RichText::new(name).color(p.muted)).truncate());
                                 ui.label(RichText::new(format!("{} sh", fmt_qty(o.quantity))).font(theme::mono(12.5)));
                                 ui.label(RichText::new(format!("≈ {}", money(o.est_value()))).font(theme::mono(12.5)));
@@ -190,7 +190,6 @@ impl IndexerApp {
             return;
         };
         let p = pal(ui);
-        let market = self.market.value.as_ref();
         let mut done = false;
 
         let frame = egui::Frame::new().fill(p.bg).inner_margin(egui::Margin::symmetric(22, 16));
@@ -273,8 +272,8 @@ impl IndexerApp {
                                         ui.label(RichText::new(&o.symbol).font(theme::mono_semibold(13.0)));
                                     });
                                     row.col(|ui| {
-                                        let name = market.and_then(|m| m.get(&o.symbol)?.description.as_deref()).unwrap_or("");
-                                        ui.label(name).on_hover_text(name);
+                                        let name = self.display_name(&o.symbol);
+                                        ui.label(&name).on_hover_text(&name);
                                     });
                                     row.col(|ui| {
                                         ui.label(RichText::new(fmt_qty(o.quantity)).font(theme::mono(12.5)));
