@@ -326,7 +326,8 @@ pub fn toggle_button(
     let p = pal(ui);
     let (fg, bg, stroke) = if on {
         match tone_on {
-            Tone::Loss => (p.loss, p.loss_soft, p.loss),
+            // Solid red: marking a holding to be sold should be unmistakable.
+            Tone::Loss => (p.on_accent, p.loss, p.loss),
             Tone::Warn => (p.warn, p.warn_soft, p.warn),
             _ => (p.accent, p.accent_soft, p.accent),
         }
