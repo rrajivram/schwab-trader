@@ -441,6 +441,11 @@ impl IndexerApp {
                     .collect();
                 let sort = self.sort.get(sector).copied().unwrap_or_default();
                 rows.sort_by(|a, b| compare(a, b, sort));
+                // Browse and Rebalance: held positions always lead their sector.
+                // The sort is stable, so each group keeps the column order.
+                if matches!(self.mode, Mode::Browse | Mode::Rebalance) {
+                    rows.sort_by_key(|r| r.held.is_none());
+                }
                 let n_held = rows.iter().filter(|r| r.held.is_some()).count();
                 let n_losing = rows.iter().filter(|r| r.held.is_some_and(Held::is_losing)).count();
                 let n_selected = rows.iter().filter(|r| r.selected).count();
@@ -544,9 +549,18 @@ fn sector_table(ui: &mut egui::Ui, sector: &str, rows: &[Row], sort: SortState, 
         .body(|mut body| {
             for r in rows {
                 body.row(26.0, |mut row| {
-                    let stripe = r.held.map(|h| if h.is_losing() { p.loss } else { p.gain });
+                    // Held rows: light green/red background across the whole row
+                    // (above/below cost incl. dividends) plus a stronger left stripe.
+                    let (stripe, tint) = match r.held {
+                        Some(h) if h.is_losing() => (Some(p.loss), Some(p.loss_soft)),
+                        Some(_) => (Some(p.gain), Some(p.gain_soft)),
+                        None => (None, None),
+                    };
                     let mut first = true;
                     let mut mark = |ui: &mut egui::Ui| {
+                        if let Some(bg) = tint {
+                            theme::row_tint(ui, bg);
+                        }
                         if first {
                             if let Some(c) = stripe {
                                 theme::left_stripe(ui, c);

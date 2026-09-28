@@ -357,6 +357,16 @@ pub fn weight_bar(ui: &mut egui::Ui, fraction: f32, width: f32) {
     painter.rect_filled(fill, CornerRadius::same(3), p.accent);
 }
 
+/// Fill a table cell's background, including half the spacing on each side
+/// so adjacent cells join into one unbroken row band. Cells clip to their
+/// own rect, so the painter's clip is widened to match.
+pub fn row_tint(ui: &egui::Ui, color: Color32) {
+    let rect = ui.max_rect().expand2(0.5 * ui.spacing().item_spacing);
+    let mut painter = ui.painter().clone();
+    painter.set_clip_rect(rect);
+    painter.rect_filled(rect, CornerRadius::ZERO, color);
+}
+
 /// Colored stripe on a table cell's left edge (held position gain/loss).
 pub fn left_stripe(ui: &egui::Ui, color: Color32) {
     // Inside the cell: painting outside it is clipped away.
