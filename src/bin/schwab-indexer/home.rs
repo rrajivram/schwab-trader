@@ -140,6 +140,7 @@ impl IndexerApp {
         match self.mode {
             Mode::Review => return self.review_ui(ui),
             Mode::Execute => return self.execute_ui(ui),
+            Mode::Bonds => return self.bonds_ui(ui),
             _ => {}
         }
         self.summary_strip(ui);
@@ -149,7 +150,7 @@ impl IndexerApp {
         match self.mode {
             Mode::Create => self.create_panel(ui),
             Mode::Rebalance => self.rebalance_panel(ui),
-            Mode::Browse | Mode::Review | Mode::Execute => {}
+            Mode::Browse | Mode::Review | Mode::Execute | Mode::Bonds => {}
         }
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(pal(ui).bg).inner_margin(Margin::symmetric(18, 10)))
@@ -242,7 +243,7 @@ impl IndexerApp {
         }
     }
 
-    /// Browse | Create | Rebalance, as one segmented control.
+    /// Browse | Create | Rebalance | Bonds, as one segmented control.
     fn mode_switcher(&mut self, ui: &mut egui::Ui) {
         let p = pal(ui);
         let current = match self.mode {
@@ -252,6 +253,7 @@ impl IndexerApp {
             m => m,
         };
         let enabled = self.universe.value.is_some() && self.mode != Mode::Execute;
+        let soon = crate::bonds_tab::soon_count(self);
         egui::Frame::new()
             .fill(p.neutral_soft)
             .corner_radius(CornerRadius::same(8))
@@ -263,7 +265,16 @@ impl IndexerApp {
                         (Mode::Browse, "Browse", "Explore the index"),
                         (Mode::Create, "Create", "Build a new basket"),
                         (Mode::Rebalance, "Rebalance", "Replace holdings that are below cost"),
+                        (Mode::Bonds, "Bonds", "Maturities and coupons coming your way"),
                     ] {
+                        let label = if mode == Mode::Bonds && soon > 0 { format!("Bonds · {soon}") } else { label.to_string() };
+                        let hint = if mode == Mode::Bonds && soon > 0 {
+                            format!("{soon} payment{} in the next 30 days", if soon == 1 { "" } else { "s" })
+                        } else {
+                            hint.to_string()
+                        };
+                        // Bonds only need the account, not the index data.
+                        let enabled = if mode == Mode::Bonds { self.mode != Mode::Execute } else { enabled };
                         let on = current == mode;
                         let text = RichText::new(label)
                             .font(if on { theme::sans_semibold(theme::BODY) } else { theme::sans_medium(theme::BODY) })
@@ -427,7 +438,7 @@ impl IndexerApp {
                                 self.discards.contains(&c.symbol),
                                 !dnt && held.is_some_and(Held::is_losing),
                             ),
-                            Mode::Browse | Mode::Review | Mode::Execute => (false, false),
+                            Mode::Browse | Mode::Review | Mode::Execute | Mode::Bonds => (false, false),
                         };
                         let md = market.get(&c.symbol);
                         let name = self
@@ -504,7 +515,7 @@ fn sector_table(ui: &mut egui::Ui, sector: &str, rows: &[Row], sort: SortState, 
     let select = match mode {
         Mode::Create => Some(("Basket", "Add", "✓ In basket", "Click to remove from the basket")),
         Mode::Rebalance => Some(("Discard", "Discard", "✓ Discarding", "Click to keep this holding")),
-        Mode::Browse | Mode::Review | Mode::Execute => None,
+        Mode::Browse | Mode::Review | Mode::Execute | Mode::Bonds => None,
     };
     let p = pal(ui);
     let mut table = TableBuilder::new(ui)

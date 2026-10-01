@@ -4,6 +4,7 @@
 use eframe::egui;
 
 mod app;
+mod bonds_tab;
 mod execute;
 mod home;
 mod modes;

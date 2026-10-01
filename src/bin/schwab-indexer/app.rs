@@ -111,6 +111,8 @@ pub struct IndexerApp {
     pub(crate) av_notes: Vec<String>,
     pub(crate) av_used_today: u32,
     pub(crate) settings: Option<SettingsForm>,
+    /// Bonds tab sort: (column, ascending); None = by maturity.
+    pub(crate) bond_sort: Option<(usize, bool)>,
 }
 
 pub struct SettingsForm {
@@ -155,6 +157,7 @@ impl IndexerApp {
             av_notes: Vec::new(),
             av_used_today: av_cache.used_today(),
             settings: None,
+            bond_sort: None,
         }
     }
 

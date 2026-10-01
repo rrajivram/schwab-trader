@@ -103,3 +103,18 @@ async fn alphavantage_overview_live() {
     cache.overviews.insert("KO".into(), o);
     cache.save().unwrap();
 }
+
+/// Bonds tab data from the live account: payments with weekend shifts.
+#[tokio::test]
+#[ignore]
+async fn bonds_live() {
+    use schwab::bonds;
+    let hashes = accounts::list_account_numbers().await.unwrap();
+    let acct = accounts::get_account(&hashes[0]).await.unwrap();
+    let held = bonds::bonds_in(&acct);
+    let today = chrono::Local::now().date_naive();
+    for p in bonds::upcoming(&held, today) {
+        println!("{} (sched {}) {:?} {} {:.2}", p.paid, p.scheduled, p.kind, p.description, p.amount);
+    }
+    assert!(!held.is_empty());
+}

@@ -23,6 +23,8 @@ pub enum Mode {
     Review,
     /// Placing (or previewing) orders.
     Execute,
+    /// Bond maturities and coupons.
+    Bonds,
 }
 
 pub struct Review {

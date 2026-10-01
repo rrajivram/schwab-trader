@@ -60,6 +60,10 @@ mod tests {
             cost_basis_per_share: cost_per_share,
             market_value,
             long_open_profit_loss: market_value - qty * cost_per_share,
+            average_price: cost_per_share,
+            cusip: None,
+            maturity_date: None,
+            coupon_rate: None,
         }
     }
 

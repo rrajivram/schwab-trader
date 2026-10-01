@@ -7,6 +7,7 @@ pub mod api;
 pub mod auth;
 pub mod basket;
 pub mod blacklist;
+pub mod bonds;
 pub mod config;
 pub mod dividends;
 pub mod execution;

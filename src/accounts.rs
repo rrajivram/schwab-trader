@@ -34,6 +34,15 @@ pub struct Position {
     /// Negative means an unrealized loss — this is what Phase 5's loss scan
     /// will key off of instead of recomputing (price - cost) * quantity itself.
     pub long_open_profit_loss: f64,
+    /// Average purchase price as Schwab reports it. For bonds this is a
+    /// percent of face value (99.58 = 99.58% of par).
+    pub average_price: f64,
+    /// Fixed income only (verified live on Treasury bills and notes):
+    /// `instrument.maturityDate`, and `instrument.variableRate`, which holds
+    /// the coupon rate in percent (0 for bills).
+    pub cusip: Option<String>,
+    pub maturity_date: Option<chrono::NaiveDate>,
+    pub coupon_rate: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +132,13 @@ fn parse_position(p: &Value) -> Option<Position> {
         cost_basis_per_share: p["taxLotAverageLongPrice"].as_f64().unwrap_or(0.0),
         market_value: p["marketValue"].as_f64().unwrap_or(0.0),
         long_open_profit_loss: p["longOpenProfitLoss"].as_f64().unwrap_or(0.0),
+        average_price: p["averagePrice"].as_f64().unwrap_or(0.0),
+        cusip: p["instrument"]["cusip"].as_str().map(str::to_string),
+        // "2026-11-05T05:00:00.000+00:00" — the date part is the maturity date.
+        maturity_date: p["instrument"]["maturityDate"]
+            .as_str()
+            .and_then(|s| chrono::NaiveDate::parse_from_str(s.get(..10)?, "%Y-%m-%d").ok()),
+        coupon_rate: p["instrument"]["variableRate"].as_f64(),
     })
 }
 
