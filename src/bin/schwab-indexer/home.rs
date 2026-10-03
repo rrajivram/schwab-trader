@@ -86,7 +86,7 @@ impl Row<'_> {
             Col::Freq => md?.div_freq.map(f64::from),
             Col::Volume => md?.volume.map(|v| v as f64),
             Col::Held => self.held.map(|h| h.quantity),
-            Col::Return => self.held.map(Held::total_return),
+            Col::Return => self.held.and_then(Held::gain),
             Col::Symbol | Col::Name => None,
         }
     }
@@ -313,12 +313,33 @@ impl IndexerApp {
                     match &self.account.value {
                         Some(acct) => {
                             theme::stat(ui, "Cash", &money(acct.cash_balance), None);
-                            let value: f64 = self.held.values().map(|h| h.market_value).sum();
-                            let ret: f64 = self.held.values().map(Held::total_return).sum();
-                            theme::stat(ui, "Stock holdings", &money(value), None);
-                            let color = if ret >= 0.0 { p.gain } else { p.loss };
-                            theme::stat(ui, "Gain / loss incl. dividends", &money(ret), Some(color));
-                            theme::stat(ui, "Positions", &self.held.len().to_string(), None);
+                            // Everything in the account, by kind, so the pieces add
+                            // up to Schwab's account value.
+                            let by_kind = |f: &dyn Fn(&str) -> bool| -> (f64, usize) {
+                                let ps: Vec<_> = acct.positions.iter().filter(|x| x.long_quantity > 0.0 && f(&x.asset_type)).collect();
+                                (ps.iter().map(|x| x.market_value).sum(), ps.len())
+                            };
+                            let (stocks, n_stocks) = by_kind(&|t| t == "EQUITY");
+                            let (bonds, n_bonds) = by_kind(&|t| t == "FIXED_INCOME");
+                            let (funds, n_funds) = by_kind(&|t| t != "EQUITY" && t != "FIXED_INCOME");
+                            theme::stat(ui, &format!("Stocks · {n_stocks}"), &money(stocks), None);
+                            theme::stat(ui, &format!("ETFs & funds · {n_funds}"), &money(funds), None);
+                            theme::stat(ui, &format!("Bonds · {n_bonds}"), &money(bonds), None);
+                            theme::stat(ui, "Account value", &money(acct.liquidation_value), Some(p.accent));
+                            // Gain/loss only where Schwab reports a cost basis.
+                            let known: Vec<f64> = self.held.values().filter_map(Held::gain).collect();
+                            let unknown = self.held.len() - known.len();
+                            if known.is_empty() {
+                                theme::stat(ui, "Stock gain / loss", "—", Some(p.muted));
+                            } else {
+                                let ret: f64 = known.iter().sum();
+                                let color = if ret >= 0.0 { p.gain } else { p.loss };
+                                theme::stat(ui, &format!("Stock gain / loss · {} of {}", known.len(), self.held.len()), &money(ret), Some(color));
+                            }
+                            if unknown > 0 {
+                                ui.label(RichText::new(format!("{unknown} stocks have no cost basis from Schwab")).color(p.muted).font(theme::sans(theme::SMALL)))
+                                    .on_hover_text("Schwab's API reports an average price of 0 for these (usually shares transferred in), so their gain or loss can't be computed here.");
+                            }
                         }
                         None if self.account.loading => {
                             ui.spinner();
@@ -483,7 +504,8 @@ impl IndexerApp {
                             ui.label(RichText::new(format!("{:.1}%", sector_weight * 100.0)).font(theme::mono_medium(theme::BODY)));
                             ui.label(RichText::new(format!("{} stocks", rows.len())).color(p.muted));
                             if n_held > 0 {
-                                let tone = if n_losing > 0 { Tone::Loss } else { Tone::Gain };
+                                let all_unknown = rows.iter().filter_map(|r| r.held).all(|h| h.cost_unknown);
+                                let tone = if n_losing > 0 { Tone::Loss } else if all_unknown { Tone::Neutral } else { Tone::Gain };
                                 theme::tone_pill(ui, &format!("{n_held} held"), tone);
                             }
                             if n_selected > 0 {
@@ -575,6 +597,7 @@ fn sector_table(ui: &mut egui::Ui, sector: &str, rows: &[Row], sort: SortState, 
                     // Held rows: light green/red background across the whole row
                     // (above/below cost incl. dividends) plus a stronger left stripe.
                     let (stripe, tint) = match r.held {
+                        Some(h) if h.cost_unknown => (Some(p.muted), Some(p.neutral_soft)),
                         Some(h) if h.is_losing() => (Some(p.loss), Some(p.loss_soft)),
                         Some(_) => (Some(p.gain), Some(p.gain_soft)),
                         None => (None, None),
@@ -650,7 +673,14 @@ fn cell(ui: &mut egui::Ui, r: &Row, col: Col) {
             ui.label(RichText::new(r.name()).color(p.ink)).on_hover_text(r.name());
         }
         Col::Return => {
-            if let Some(h) = r.held {
+            if let Some(h) = r.held.filter(|h| h.cost_unknown) {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new("no cost basis").color(p.muted).font(theme::sans(theme::SMALL))).on_hover_text(format!(
+                        "Schwab reports no purchase price for this position, so its gain or loss is unknown. Value {}.",
+                        money(h.market_value)
+                    ));
+                });
+            } else if let Some(h) = r.held {
                 let v = h.total_return();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let tone = if v >= 0.0 { Tone::Gain } else { Tone::Loss };

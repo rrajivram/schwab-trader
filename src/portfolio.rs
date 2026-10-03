@@ -14,6 +14,10 @@ pub struct Held {
     pub market_value: f64,
     /// Dividends received on this symbol (best-effort history window).
     pub dividends: f64,
+    /// False when Schwab reports no cost basis for any part of the position
+    /// (average price 0 — seen live on transferred-in shares). The gain or
+    /// loss is then unknown, not "everything is profit".
+    pub cost_unknown: bool,
 }
 
 impl Held {
@@ -22,9 +26,15 @@ impl Held {
         self.market_value + self.dividends - self.cost
     }
 
-    /// Below purchase price once dividends are counted.
+    /// Gain/loss including dividends, when the cost basis is known.
+    pub fn gain(&self) -> Option<f64> {
+        (!self.cost_unknown).then(|| self.total_return())
+    }
+
+    /// Below purchase price once dividends are counted. Never true when the
+    /// cost basis is unknown.
     pub fn is_losing(&self) -> bool {
-        self.total_return() < 0.0
+        self.gain().is_some_and(|g| g < 0.0)
     }
 }
 
@@ -36,6 +46,9 @@ pub fn held_positions(account: &Account, dividends: &HashMap<String, f64>) -> Ha
         h.quantity += p.long_quantity;
         h.cost += p.long_quantity * p.cost_basis_per_share;
         h.market_value += p.market_value;
+        if p.cost_basis_per_share <= 0.0 {
+            h.cost_unknown = true;
+        }
     }
     for (symbol, amount) in dividends {
         if let Some(h) = out.get_mut(&universe_symbol(symbol)) {
@@ -85,6 +98,15 @@ mod tests {
         let held = held_positions(&acct, &divs);
         assert!((held["KO"].total_return() - 10.0).abs() < 1e-9);
         assert!(!held["KO"].is_losing());
+    }
+
+    #[test]
+    fn zero_cost_basis_means_unknown_gain_not_pure_profit() {
+        let acct = account(vec![pos("MSFT", 10.0, 0.0, 5175.0)]);
+        let held = held_positions(&acct, &HashMap::new());
+        assert!(held["MSFT"].cost_unknown);
+        assert_eq!(held["MSFT"].gain(), None);
+        assert!(!held["MSFT"].is_losing());
     }
 
     #[test]
