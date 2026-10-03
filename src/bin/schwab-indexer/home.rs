@@ -26,6 +26,7 @@ pub enum Col {
     Freq,
     Volume,
     Held,
+    Value,
     Return,
 }
 
@@ -44,6 +45,7 @@ const COLUMNS: &[(Col, &str, &str)] = &[
     (Col::Freq, "Div Freq", "Dividend payments per year"),
     (Col::Volume, "Volume", "Shares traded today"),
     (Col::Held, "Held", "Shares you own"),
+    (Col::Value, "Value", "Market value of what you hold"),
     (Col::Return, "Gain/Loss", "Unrealized gain/loss including dividends received"),
 ];
 
@@ -75,7 +77,7 @@ impl Row<'_> {
     fn num(&self, col: Col) -> Option<f64> {
         let md = self.md;
         match col {
-            Col::Weight => Some(self.c.weight),
+            Col::Weight => (self.c.weight > 0.0).then_some(self.c.weight),
             Col::Price => md?.price,
             Col::Change => md?.net_percent_change,
             Col::Low52 => md?.w52_low,
@@ -86,6 +88,7 @@ impl Row<'_> {
             Col::Freq => md?.div_freq.map(f64::from),
             Col::Volume => md?.volume.map(|v| v as f64),
             Col::Held => self.held.map(|h| h.quantity),
+            Col::Value => self.held.map(|h| h.market_value),
             Col::Return => self.held.and_then(Held::gain),
             Col::Symbol | Col::Name => None,
         }
@@ -126,6 +129,9 @@ fn freq_label(freq: Option<u32>) -> &'static str {
 fn opt(v: Option<f64>, f: impl Fn(f64) -> String) -> String {
     v.map(f).unwrap_or_else(|| "—".into())
 }
+
+/// Card for holdings that aren't S&P 500 constituents.
+const OTHER_SECTION: &str = "ETFs & other holdings";
 
 enum Action {
     SetDnt(String, bool),
@@ -330,14 +336,14 @@ impl IndexerApp {
                             let known: Vec<f64> = self.held.values().filter_map(Held::gain).collect();
                             let unknown = self.held.len() - known.len();
                             if known.is_empty() {
-                                theme::stat(ui, "Stock gain / loss", "—", Some(p.muted));
+                                theme::stat(ui, "Gain / loss", "—", Some(p.muted));
                             } else {
                                 let ret: f64 = known.iter().sum();
                                 let color = if ret >= 0.0 { p.gain } else { p.loss };
-                                theme::stat(ui, &format!("Stock gain / loss · {} of {}", known.len(), self.held.len()), &money(ret), Some(color));
+                                theme::stat(ui, &format!("Gain / loss · {} of {} holdings", known.len(), self.held.len()), &money(ret), Some(color));
                             }
                             if unknown > 0 {
-                                ui.label(RichText::new(format!("{unknown} stocks have no cost basis from Schwab")).color(p.muted).font(theme::sans(theme::SMALL)))
+                                ui.label(RichText::new(format!("{unknown} holdings have no cost basis from Schwab")).color(p.muted).font(theme::sans(theme::SMALL)))
                                     .on_hover_text("Schwab's API reports an average price of 0 for these (usually shares transferred in), so their gain or loss can't be computed here.");
                             }
                         }
@@ -455,8 +461,47 @@ impl IndexerApp {
         let sectors = universe.sectors_by_weight();
         let max_weight = sectors.first().map_or(1.0, |(_, w)| *w);
 
+        let in_index: std::collections::HashSet<&str> = universe.constituents.iter().map(|c| c.symbol.as_str()).collect();
+        let mut other_syms: Vec<&String> = self.held.keys().filter(|s| !in_index.contains(s.as_str())).collect();
+        other_syms.sort();
+        let others: Vec<Constituent> = other_syms
+            .into_iter()
+            .map(|s| Constituent { symbol: s.clone(), sector: OTHER_SECTION.to_string(), weight: 0.0, merged: Vec::new() })
+            .collect();
+
         egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 10.0;
+            // Holdings outside the S&P 500 (ETFs, funds, other stocks) get their
+            // own card, laid out like a sector.
+            if matches!(self.mode, Mode::Browse | Mode::Rebalance) && !others.is_empty() {
+                let mut rows: Vec<Row> = others
+                    .iter()
+                    .map(|c| {
+                        let md = market.get(&c.symbol);
+                        let name = md.and_then(|m| m.description.as_deref()).unwrap_or("");
+                        Row { c, md, held: self.held.get(&c.symbol), dnt: self.dnt.contains(&c.symbol), selected: false, selectable: false, name }
+                    })
+                    .collect();
+                let sort = self.sort.get(OTHER_SECTION).copied().unwrap_or(SortState { col: Col::Value, ascending: false });
+                rows.sort_by(|a, b| compare(a, b, sort));
+                let value: f64 = rows.iter().filter_map(|r| r.held).map(|h| h.market_value).sum();
+                theme::card(ui).inner_margin(Margin::symmetric(14, 8)).show(ui, |ui| {
+                    let id = ui.make_persistent_id(("sector", OTHER_SECTION));
+                    egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true)
+                        .show_header(ui, |ui| {
+                            ui.label(RichText::new(OTHER_SECTION).font(theme::sans_semibold(theme::TITLE)).color(p.ink));
+                            ui.add_space(8.0);
+                            ui.label(RichText::new(money(value)).font(theme::mono_medium(theme::BODY)));
+                            ui.label(RichText::new(format!("{} positions outside the S&P 500", rows.len())).color(p.muted));
+                        })
+                        .body_unindented(|ui| {
+                            ui.add_space(4.0);
+                            // Browse layout: these can't be added to a basket or swapped by Rebalance.
+                            sector_table(ui, OTHER_SECTION, &rows, sort, Mode::Browse, &mut actions);
+                        });
+                });
+            }
+
             for (sector, sector_weight) in &sectors {
                 let mut rows: Vec<Row> = universe
                     .constituents
@@ -567,7 +612,7 @@ fn sector_table(ui: &mut egui::Ui, sector: &str, rows: &[Row], sort: SortState, 
             Col::Name => Column::initial(210.0).clip(true),
             Col::Symbol => Column::initial(70.0),
             Col::Freq => Column::initial(92.0),
-            Col::Volume | Col::Return => Column::initial(104.0),
+            Col::Volume | Col::Return | Col::Value => Column::initial(104.0),
             _ => Column::initial(80.0),
         });
     }
@@ -707,6 +752,13 @@ fn cell(ui: &mut egui::Ui, r: &Row, col: Col) {
                 right(ui, RichText::new(fmt_qty(h.quantity)).font(theme::mono_semibold(12.5)).color(p.ink));
             }
         }
+        Col::Value => {
+            if let Some(h) = r.held {
+                right(ui, RichText::new(money(h.market_value)).font(theme::mono(12.5)).color(p.ink));
+            }
+        }
+        // Not in the index (ETFs, other holdings): no weight to show.
+        Col::Weight if r.c.weight <= 0.0 => right(ui, figure("—".into())),
         Col::Weight => right(ui, figure(format!("{:.3}%", r.c.weight * 100.0))),
         Col::Price | Col::Low52 | Col::High52 | Col::Eps => right(ui, figure(opt(r.num(col), |v| format!("{v:.2}")))),
         Col::Pe => right(ui, figure(opt(r.num(col), |v| format!("{v:.1}")))),

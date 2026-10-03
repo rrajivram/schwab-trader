@@ -38,10 +38,12 @@ impl Held {
     }
 }
 
-/// Long equity positions only (e.g. Treasuries are skipped).
+/// Long stock and fund positions (stocks, ETFs, mutual funds). Bonds have
+/// their own model (`bonds`), and options and cash sweeps aren't holdings
+/// the indexer works with.
 pub fn held_positions(account: &Account, dividends: &HashMap<String, f64>) -> HashMap<String, Held> {
     let mut out: HashMap<String, Held> = HashMap::new();
-    for p in account.positions.iter().filter(|p| p.long_quantity > 0.0 && p.asset_type == "EQUITY") {
+    for p in account.positions.iter().filter(|p| p.long_quantity > 0.0 && !matches!(p.asset_type.as_str(), "FIXED_INCOME" | "OPTION" | "CASH_EQUIVALENT")) {
         let h = out.entry(universe_symbol(&p.symbol)).or_default();
         h.quantity += p.long_quantity;
         h.cost += p.long_quantity * p.cost_basis_per_share;

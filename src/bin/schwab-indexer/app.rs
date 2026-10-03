@@ -191,7 +191,13 @@ impl IndexerApp {
 
     pub(crate) fn load_market(&mut self) {
         let Some(u) = &self.universe.value else { return };
-        let symbols = u.constituents.iter().map(|c| c.symbol.clone()).collect();
+        // The index, plus anything held outside it (ETFs, other stocks).
+        let mut symbols: Vec<String> = u.constituents.iter().map(|c| c.symbol.clone()).collect();
+        for s in self.held.keys() {
+            if !symbols.contains(s) {
+                symbols.push(s.clone());
+            }
+        }
         self.market.start();
         self.worker.load_market(symbols);
     }
@@ -284,6 +290,11 @@ impl IndexerApp {
             Msg::AccountLoaded(result) => {
                 self.account.finish(result);
                 self.rebuild_held();
+                // New holdings outside the index need quotes too.
+                let missing = self.market.value.as_ref().is_some_and(|m| self.held.keys().any(|s| !m.contains_key(s)));
+                if missing && !self.market.loading {
+                    self.load_market();
+                }
                 if let Some(acct) = &self.account.value {
                     self.dividends.start();
                     let held: Vec<String> = self.held.keys().cloned().collect();
