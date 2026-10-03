@@ -134,13 +134,14 @@ enum Action {
 }
 
 impl IndexerApp {
-    pub(crate) fn home_ui(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn home_ui(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
         self.top_bar(ui);
         self.settings_modal(ui);
         match self.mode {
             Mode::Review => return self.review_ui(ui),
             Mode::Execute => return self.execute_ui(ui),
             Mode::Bonds => return self.bonds_ui(ui),
+            Mode::Plan => return self.plan_ui(ui, frame),
             _ => {}
         }
         self.summary_strip(ui);
@@ -150,7 +151,7 @@ impl IndexerApp {
         match self.mode {
             Mode::Create => self.create_panel(ui),
             Mode::Rebalance => self.rebalance_panel(ui),
-            Mode::Browse | Mode::Review | Mode::Execute | Mode::Bonds => {}
+            Mode::Browse | Mode::Review | Mode::Execute | Mode::Bonds | Mode::Plan => {}
         }
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(pal(ui).bg).inner_margin(Margin::symmetric(18, 10)))
@@ -176,7 +177,11 @@ impl IndexerApp {
                     }
                     if ui.button("Settings").clicked() {
                         let key = schwab::config::Config::load().ok().and_then(|c| c.alphavantage_key).unwrap_or_default();
-                        self.settings = Some(crate::app::SettingsForm { av_key: key, saved: false });
+                        let plan_page = schwab::config::Config::load()
+                            .ok()
+                            .and_then(|c| c.plan_page)
+                            .unwrap_or_else(|| crate::plan_tab::DEFAULT_PLAN_PAGE.to_string());
+                        self.settings = Some(crate::app::SettingsForm { plan_page, av_key: key, saved: false });
                     }
                     let busy = self.account.loading || self.market.loading || self.universe.loading;
                     let locked = self.mode == Mode::Execute;
@@ -222,6 +227,10 @@ impl IndexerApp {
                 );
                 ui.hyperlink_to(RichText::new("Get a key").font(theme::sans(theme::SMALL)), "https://www.alphavantage.co/support/#api-key");
             });
+            ui.add_space(10.0);
+            ui.label(theme::eyebrow(ui, "Plan tab page"));
+            ui.label(RichText::new("The local HTML file shown in the Plan tab.").color(p.muted));
+            ui.add(egui::TextEdit::singleline(&mut form.plan_page).desired_width(f32::INFINITY));
             if form.saved {
                 ui.label(RichText::new("Saved").color(p.gain));
             }
@@ -233,6 +242,8 @@ impl IndexerApp {
                         let mut cfg = schwab::config::Config::load().unwrap_or_default();
                         let key = form.av_key.trim().to_string();
                         cfg.alphavantage_key = (!key.is_empty()).then_some(key);
+                        let page = form.plan_page.trim().to_string();
+                        cfg.plan_page = (!page.is_empty()).then_some(page);
                         form.saved = cfg.save().is_ok();
                     }
                 });
@@ -266,6 +277,7 @@ impl IndexerApp {
                         (Mode::Create, "Create", "Build a new basket"),
                         (Mode::Rebalance, "Rebalance", "Replace holdings that are below cost"),
                         (Mode::Bonds, "Bonds", "Maturities and coupons coming your way"),
+                        (Mode::Plan, "Plan", "Your divestiture plan page"),
                     ] {
                         let label = if mode == Mode::Bonds && soon > 0 { format!("Bonds · {soon}") } else { label.to_string() };
                         let hint = if mode == Mode::Bonds && soon > 0 {
@@ -274,7 +286,7 @@ impl IndexerApp {
                             hint.to_string()
                         };
                         // Bonds only need the account, not the index data.
-                        let enabled = if mode == Mode::Bonds { self.mode != Mode::Execute } else { enabled };
+                        let enabled = if matches!(mode, Mode::Bonds | Mode::Plan) { self.mode != Mode::Execute } else { enabled };
                         let on = current == mode;
                         let text = RichText::new(label)
                             .font(if on { theme::sans_semibold(theme::BODY) } else { theme::sans_medium(theme::BODY) })
@@ -438,7 +450,7 @@ impl IndexerApp {
                                 self.discards.contains(&c.symbol),
                                 !dnt && held.is_some_and(Held::is_losing),
                             ),
-                            Mode::Browse | Mode::Review | Mode::Execute | Mode::Bonds => (false, false),
+                            Mode::Browse | Mode::Review | Mode::Execute | Mode::Bonds | Mode::Plan => (false, false),
                         };
                         let md = market.get(&c.symbol);
                         let name = self
@@ -515,7 +527,7 @@ fn sector_table(ui: &mut egui::Ui, sector: &str, rows: &[Row], sort: SortState, 
     let select = match mode {
         Mode::Create => Some(("Basket", "Add", "✓ In basket", "Click to remove from the basket")),
         Mode::Rebalance => Some(("Discard", "Discard", "✓ Discarding", "Click to keep this holding")),
-        Mode::Browse | Mode::Review | Mode::Execute | Mode::Bonds => None,
+        Mode::Browse | Mode::Review | Mode::Execute | Mode::Bonds | Mode::Plan => None,
     };
     let p = pal(ui);
     let mut table = TableBuilder::new(ui)

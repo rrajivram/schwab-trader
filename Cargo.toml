@@ -28,3 +28,4 @@ tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 url = "2"
 urlencoding = "2"
 webbrowser = "1"
+wry = "0.57.0"

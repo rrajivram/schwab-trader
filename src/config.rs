@@ -18,6 +18,9 @@ pub struct Config {
     /// Alpha Vantage API key (forward P/E, analyst data) for schwab-indexer.
     #[serde(default)]
     pub alphavantage_key: Option<String>,
+    /// Local HTML page shown in schwab-indexer's Plan tab.
+    #[serde(default)]
+    pub plan_page: Option<String>,
 }
 
 fn default_redirect_uri() -> String {
@@ -35,6 +38,7 @@ impl Default for Config {
             token_expiry: None,
             selected_account_hash: None,
             alphavantage_key: None,
+            plan_page: None,
         }
     }
 }

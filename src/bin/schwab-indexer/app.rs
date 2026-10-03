@@ -113,9 +113,11 @@ pub struct IndexerApp {
     pub(crate) settings: Option<SettingsForm>,
     /// Bonds tab sort: (column, ascending); None = by maturity.
     pub(crate) bond_sort: Option<(usize, bool)>,
+    pub(crate) plan: crate::plan_tab::PlanView,
 }
 
 pub struct SettingsForm {
+    pub plan_page: String,
     pub av_key: String,
     pub saved: bool,
 }
@@ -142,7 +144,12 @@ impl IndexerApp {
             dnt_error,
             show_dnt_panel: false,
             sort: HashMap::new(),
-            mode: Mode::Browse,
+            // INDEXER_TAB=bonds|plan opens straight onto that tab.
+            mode: match std::env::var("INDEXER_TAB").as_deref() {
+                Ok("bonds") => Mode::Bonds,
+                Ok("plan") => Mode::Plan,
+                _ => Mode::Browse,
+            },
             basket: Vec::new(),
             auto_size: 20,
             max_pe_enabled: false,
@@ -158,6 +165,7 @@ impl IndexerApp {
             av_used_today: av_cache.used_today(),
             settings: None,
             bond_sort: None,
+            plan: Default::default(),
         }
     }
 
@@ -384,7 +392,7 @@ impl IndexerApp {
 }
 
 impl eframe::App for IndexerApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         while let Ok(msg) = self.worker.rx.try_recv() {
             self.handle(msg);
         }
@@ -401,7 +409,12 @@ impl eframe::App for IndexerApp {
                     egui::ScrollArea::vertical().show(ui, |ui| self.login_ui(ui));
                 });
             }
-            Screen::Home => self.home_ui(ui),
+            Screen::Home => self.home_ui(ui, frame),
+        }
+        // The native web view floats above egui, so it must be hidden
+        // explicitly whenever the Plan tab isn't the thing on screen.
+        if !(matches!(self.screen, Screen::Home) && self.mode == Mode::Plan) {
+            self.plan.hide();
         }
     }
 }

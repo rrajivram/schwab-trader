@@ -25,6 +25,8 @@ pub enum Mode {
     Execute,
     /// Bond maturities and coupons.
     Bonds,
+    /// The local divestiture-plan page in a web view.
+    Plan,
 }
 
 pub struct Review {

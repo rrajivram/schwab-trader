@@ -8,6 +8,7 @@ mod bonds_tab;
 mod execute;
 mod home;
 mod modes;
+mod plan_tab;
 mod theme;
 mod worker;
 
