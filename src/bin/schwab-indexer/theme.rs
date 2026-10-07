@@ -363,9 +363,9 @@ pub fn weight_bar(ui: &mut egui::Ui, fraction: f32, width: f32) {
 /// own rect, so the painter's clip is widened to match.
 pub fn row_tint(ui: &egui::Ui, color: Color32) {
     let rect = ui.max_rect().expand2(0.5 * ui.spacing().item_spacing);
-    let mut painter = ui.painter().clone();
-    painter.set_clip_rect(rect);
-    painter.rect_filled(rect, CornerRadius::ZERO, color);
+    // Narrow the existing clip, don't replace it: replacing drops the scroll
+    // area's clip, and rows scrolled out of view paint over the summary strip.
+    ui.painter().with_clip_rect(rect).rect_filled(rect, CornerRadius::ZERO, color);
 }
 
 /// Colored stripe on a table cell's left edge (held position gain/loss).
