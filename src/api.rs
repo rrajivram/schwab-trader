@@ -97,6 +97,28 @@ pub async fn fetch_bulk_quotes(token: &str, symbols: &[String]) -> Result<Vec<Qu
 /// 504-symbol S&P 500 request, which failed until chunked.
 const MAX_SYMBOLS_PER_QUOTE_REQUEST: usize = 500;
 
+/// 13-week T-bill index. Schwab quotes it as the yield ×10 (40.37 = 4.037%).
+const RISK_FREE_SYMBOL: &str = "$IRX";
+
+/// Annualized risk-free rate as a decimal (0.0404 = 4.04%), from the live
+/// 13-week T-bill yield.
+pub async fn fetch_risk_free_rate(token: &str) -> Result<f64> {
+    let prices = fetch_last_prices(token, &[RISK_FREE_SYMBOL.to_string()]).await?;
+    match prices.get(RISK_FREE_SYMBOL) {
+        Some(&quoted) => irx_to_rate(quoted),
+        None => bail!("no quote for {RISK_FREE_SYMBOL}"),
+    }
+}
+
+fn irx_to_rate(quoted: f64) -> Result<f64> {
+    let rate = quoted / 1000.0;
+    // Guards against Schwab ever changing the ×10 convention.
+    if !(0.0..0.25).contains(&rate) {
+        bail!("{RISK_FREE_SYMBOL} quote {quoted} doesn't look like a yield ×10");
+    }
+    Ok(rate)
+}
+
 /// Fetch a current-price snapshot for a batch of symbols (for one-shot
 /// planning math, not live display — `fetch_bulk_quotes` deliberately leaves
 /// last/bid/ask unpopulated and defers to the WebSocket for those). Falls
@@ -335,6 +357,14 @@ mod tests {
         assert_eq!(b.get("AAPL"), Some(&1.08524));
         assert_eq!(b.get("BRK/B"), Some(&0.60253));
         assert!(!b.contains_key("NOBETA"));
+    }
+
+    #[test]
+    fn irx_quote_is_yield_times_ten() {
+        assert!((irx_to_rate(40.37).unwrap() - 0.04037).abs() < 1e-12);
+        assert!(irx_to_rate(4.037).is_ok()); // 0.4%: low but plausible
+        assert!(irx_to_rate(403.7).is_err());
+        assert!(irx_to_rate(-1.0).is_err());
     }
 
     #[test]

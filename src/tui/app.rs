@@ -289,7 +289,7 @@ impl PriceInputState {
             expiry: String::new(),
             iv: String::new(),
             option_type_idx: 0,
-            rate: "0.045".to_string(),
+            rate: String::new(),
             dividend_yield: "0.0".to_string(),
             focus: PriceInputFocus::Symbol,
             error: None,
@@ -320,7 +320,11 @@ impl PriceInputState {
             return Err("IV must be greater than 0.".to_string());
         }
 
-        let rate = self.rate.trim().parse::<f64>().map_err(|_| "Rate must be a number, e.g. 0.045.".to_string())?;
+        // Blank means the live 13-week T-bill yield, fetched with the spot price.
+        let rate = match self.rate.trim() {
+            "" => None,
+            r => Some(r.parse::<f64>().map_err(|_| "Rate must be a number, e.g. 0.045, or blank for the live T-bill yield.".to_string())?),
+        };
         let dividend_yield = self
             .dividend_yield
             .trim()
@@ -336,7 +340,8 @@ pub struct PriceRequest {
     pub symbol: String,
     pub base_iv: f64,
     pub expiry: NaiveDate,
-    pub rate: f64,
+    /// None = live 13-week T-bill yield.
+    pub rate: Option<f64>,
     pub dividend_yield: f64,
     pub option_type: OptionType,
 }

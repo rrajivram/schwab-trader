@@ -72,10 +72,10 @@ enum Commands {
         iv: f64,
         #[arg(long, value_enum)]
         option_type: pricing::OptionType,
-        /// Annualized risk-free rate. This codebase has no live rate
-        /// source, so this is a literal default, overridable via this flag.
-        #[arg(long, default_value_t = 0.045)]
-        rate: f64,
+        /// Annualized risk-free rate as a decimal, e.g. 0.045. Defaults to
+        /// the live 13-week T-bill yield ($IRX).
+        #[arg(long)]
+        rate: Option<f64>,
         /// Annualized dividend yield. No live source; literal default,
         /// overridable via this flag.
         #[arg(long, default_value_t = 0.0)]

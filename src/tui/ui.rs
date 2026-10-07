@@ -1029,7 +1029,7 @@ fn render_price_input(frame: &mut Frame, state: &PriceInputState, area: Rect) {
     );
 
     frame.render_widget(
-        Paragraph::new(field_line("Rate (e.g. 0.045):", &state.rate, state.focus == PriceInputFocus::Rate)),
+        Paragraph::new(field_line("Rate (blank = live T-bill):", &state.rate, state.focus == PriceInputFocus::Rate)),
         chunks[4],
     );
     frame.render_widget(

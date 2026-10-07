@@ -160,17 +160,22 @@ pub fn build_price_grid(
     })
 }
 
-/// Fetches the live underlying price, then builds the pure grid.
+/// Fetches the live underlying price (and the risk-free rate unless given),
+/// then builds the pure grid.
 pub async fn build_price_grid_live(
     symbol: &str,
     base_iv: f64,
     expiry: NaiveDate,
-    rate: f64,
+    rate: Option<f64>,
     dividend_yield: f64,
     option_type: OptionType,
 ) -> Result<PriceGrid> {
     let symbol_upper = symbol.to_uppercase();
     let token = crate::auth::get_valid_token().await?;
+    let rate = match rate {
+        Some(r) => r,
+        None => crate::api::fetch_risk_free_rate(&token).await.context("fetching the live risk-free rate; pass --rate to set it")?,
+    };
     let prices = crate::api::fetch_last_prices(&token, std::slice::from_ref(&symbol_upper)).await?;
     let spot = *prices
         .get(&symbol_upper)
@@ -186,7 +191,7 @@ pub async fn run_price_cli(
     expiry: &str,
     iv: f64,
     option_type: OptionType,
-    rate: f64,
+    rate: Option<f64>,
     dividend_yield: f64,
 ) -> Result<()> {
     let expiry = NaiveDate::parse_from_str(expiry, "%Y-%m-%d")
