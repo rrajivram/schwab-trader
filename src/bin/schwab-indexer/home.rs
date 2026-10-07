@@ -5,7 +5,7 @@ use std::cmp::Ordering;
 
 use eframe::egui::{self, CornerRadius, Margin, RichText, Stroke};
 use egui_extras::{Column, TableBuilder};
-use schwab::{api::MarketData, portfolio::Held, universe::Constituent};
+use schwab::{api::MarketData, portfolio::Held, risk::Fit, universe::Constituent};
 
 use crate::app::{group_thousands, money, IndexerApp};
 use crate::modes::{Mode, DISCARD_HINT};
@@ -23,6 +23,7 @@ pub enum Col {
     Eps,
     Pe,
     Beta,
+    Alpha,
     Yield,
     Freq,
     Volume,
@@ -43,6 +44,7 @@ const COLUMNS: &[(Col, &str, &str)] = &[
     (Col::Eps, "EPS", ""),
     (Col::Pe, "P/E", ""),
     (Col::Beta, "Beta", "How much it moves with the S&P 500: 1.0 = in step, 2.0 = twice as much, 0.5 = half (Schwab)"),
+    (Col::Alpha, "Alpha", "Return per year beyond what beta explains, over 3 years of weekly prices vs. SPY. Colored only when it stands out from noise (|t| ≥ 2)."),
     (Col::Yield, "Div Yld", "Dividend yield"),
     (Col::Freq, "Div Freq", "Dividend payments per year"),
     (Col::Volume, "Volume", "Shares traded today"),
@@ -66,6 +68,7 @@ impl Default for SortState {
 struct Row<'a> {
     c: &'a Constituent,
     md: Option<&'a MarketData>,
+    fit: Option<&'a Fit>,
     held: Option<&'a Held>,
     dnt: bool,
     /// Ticked in the mode's selection column (Basket / Discard).
@@ -87,6 +90,7 @@ impl Row<'_> {
             Col::Eps => md?.eps,
             Col::Pe => md?.pe_ratio,
             Col::Beta => md?.beta,
+            Col::Alpha => self.fit.map(|f| f.alpha),
             Col::Yield => md?.div_yield,
             Col::Freq => md?.div_freq.map(f64::from),
             Col::Volume => md?.volume.map(|v| v as f64),
@@ -117,6 +121,19 @@ fn compare(a: &Row, b: &Row, sort: SortState) -> Ordering {
         },
     }
     .then_with(|| a.c.symbol.cmp(&b.c.symbol))
+}
+
+/// Tooltip for an alpha figure: what it means and how much to trust it.
+pub fn fit_hint(f: &Fit) -> String {
+    let verdict = if f.significant() { "stands out from noise" } else { "can't be told from noise" };
+    format!(
+        "Alpha {:+.1}%/yr · t = {:.1} ({verdict})\nBeta {:.2} · R² {:.2} · {} weeks vs. SPY\n\nPrice-only returns: dividends aren't included.",
+        f.alpha * 100.0,
+        f.alpha_t,
+        f.beta,
+        f.r2,
+        f.weeks
+    )
 }
 
 fn freq_label(freq: Option<u32>) -> &'static str {
@@ -391,6 +408,12 @@ impl IndexerApp {
                         if self.dividends.loading {
                             ui.label(RichText::new("Loading dividends…").color(p.muted));
                         }
+                        if self.history_running {
+                            let (done, total) = self.history_progress;
+                            ui.spinner();
+                            ui.label(RichText::new(format!("Price history {done}/{total}")).color(p.muted))
+                                .on_hover_text("Weekly prices for alpha, about 2 per second to stay under Schwab's rate limit. Cached for a week.");
+                        }
                     });
                 });
             });
@@ -400,11 +423,19 @@ impl IndexerApp {
                 ("Index data", &self.universe.error),
                 ("Quotes", &self.market.error),
                 ("Dividends", &self.dividends.error),
+                ("Risk-free rate (needed for alpha)", &self.risk_free.error),
                 ("Do-not-transact list", &self.dnt_error),
             ] {
                 if let Some(e) = e {
                     ui.colored_label(p.loss, format!("{label}: {e}"));
                 }
+            }
+            if !self.history_failed.is_empty() {
+                let mut f = self.history_failed.clone();
+                f.sort();
+                let shown = f.iter().take(8).cloned().collect::<Vec<_>>().join(", ");
+                let more = if f.len() > 8 { format!(" and {} more", f.len() - 8) } else { String::new() };
+                ui.label(RichText::new(format!("No price history for {shown}{more}; their alpha is blank.")).color(p.warn).font(theme::sans(theme::SMALL)));
             }
             if let Some(u) = &self.universe.value {
                 for w in &u.warnings {
@@ -496,7 +527,7 @@ impl IndexerApp {
                     .map(|c| {
                         let md = market.get(&c.symbol);
                         let name = md.and_then(|m| m.description.as_deref()).unwrap_or("");
-                        Row { c, md, held: self.held.get(&c.symbol), dnt: self.dnt.contains(&c.symbol), selected: false, selectable: false, name }
+                        Row { c, md, fit: self.fits.get(&c.symbol), held: self.held.get(&c.symbol), dnt: self.dnt.contains(&c.symbol), selected: false, selectable: false, name }
                     })
                     .collect();
                 let sort = self.sort.get(OTHER_SECTION).copied().unwrap_or(SortState { col: Col::Value, ascending: false });
@@ -542,7 +573,7 @@ impl IndexerApp {
                             .and_then(|o| o.name.as_deref())
                             .or_else(|| md.and_then(|m| m.description.as_deref()))
                             .unwrap_or("");
-                        Row { c, md, held, dnt, selected, selectable, name }
+                        Row { c, md, fit: self.fits.get(&c.symbol), held, dnt, selected, selectable, name }
                     })
                     .collect();
                 let sort = self.sort.get(sector).copied().unwrap_or_default();
@@ -780,6 +811,20 @@ fn cell(ui: &mut egui::Ui, r: &Row, col: Col) {
         Col::Price | Col::Low52 | Col::High52 | Col::Eps => right(ui, figure(opt(r.num(col), |v| format!("{v:.2}")))),
         Col::Pe => right(ui, figure(opt(r.num(col), |v| format!("{v:.1}")))),
         Col::Beta => right(ui, figure(opt(r.num(col), |v| format!("{v:.2}")))),
+        Col::Alpha => match r.fit {
+            Some(f) => {
+                let color = match (f.significant(), f.alpha >= 0.0) {
+                    (false, _) => p.muted,
+                    (true, true) => p.gain,
+                    (true, false) => p.loss,
+                };
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(format!("{:+.1}%", f.alpha * 100.0)).font(theme::mono(12.5)).color(color))
+                        .on_hover_text(fit_hint(f));
+                });
+            }
+            None => right(ui, figure("—".into())),
+        },
         Col::Yield => right(ui, figure(opt(r.num(col), |v| format!("{v:.2}%")))),
         Col::Volume => right(ui, figure(opt(r.num(col), |v| group_thousands(&format!("{v:.0}"))))),
     }

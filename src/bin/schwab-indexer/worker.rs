@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use schwab::{accounts, alphavantage, api, auth, dividends, execution, universe};
+use schwab::{accounts, alphavantage, api, auth, dividends, execution, history, universe};
 
 pub enum Msg {
     /// Startup token check: Ok means a usable (possibly refreshed) token exists.
@@ -28,6 +28,12 @@ pub enum Msg {
     OverviewNote(String),
     /// Run finished; carries requests used today.
     OverviewsDone(u32),
+    /// Live 13-week T-bill yield, for fitting alpha.
+    RiskFree(Result<f64, String>),
+    /// One symbol's weekly closes arrived (already cached to disk).
+    History(String, history::Series),
+    /// Price-history run finished; carries the symbols that failed.
+    HistoryDone(Vec<String>),
 }
 
 pub struct Worker {
@@ -127,6 +133,51 @@ impl Worker {
                 ctx.request_repaint();
             })
             .await;
+        });
+    }
+
+    /// Fetch the risk-free rate, then weekly closes one symbol at a time
+    /// (benchmark first) for symbols not freshly cached. Paced to stay under
+    /// Schwab's ~120 requests a minute alongside the app's other calls.
+    pub fn load_history(&self, symbols: Vec<String>, need_rate: bool) {
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        self.rt.spawn(async move {
+            let send = |m: Msg| {
+                let _ = tx.send(m);
+                ctx.request_repaint();
+            };
+            let token = match auth::get_valid_token().await {
+                Ok(t) => t,
+                Err(e) => {
+                    if need_rate {
+                        send(Msg::RiskFree(Err(e.to_string())));
+                    }
+                    return send(Msg::HistoryDone(symbols));
+                }
+            };
+            if need_rate {
+                send(Msg::RiskFree(api::fetch_risk_free_rate(&token).await.map_err(|e| e.to_string())));
+            }
+            let mut cache = history::Cache::load();
+            let mut failed = Vec::new();
+            for (i, sym) in symbols.into_iter().enumerate() {
+                if i > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(550)).await;
+                }
+                match history::fetch_weekly(&token, &sym).await {
+                    Ok(s) => {
+                        cache.series.insert(sym.clone(), s.clone());
+                        send(Msg::History(sym, s));
+                    }
+                    Err(_) => failed.push(sym),
+                }
+                if i % 25 == 24 {
+                    let _ = cache.save();
+                }
+            }
+            let _ = cache.save();
+            send(Msg::HistoryDone(failed));
         });
     }
 

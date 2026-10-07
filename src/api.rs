@@ -288,6 +288,8 @@ pub async fn fetch_market_data(token: &str, symbols: &[String]) -> Result<HashMa
 
 /// Beta per symbol from `instruments?projection=fundamental`, which takes a
 /// comma-separated batch and answers in Schwab's slash form (`BRK/B`).
+/// Schwab sends exactly 0 when it has no beta (seen live on SNDK, a 2025
+/// spin-off), so 0 is treated as unknown.
 async fn fetch_betas(token: &str, symbols: &[String]) -> Result<HashMap<String, f64>> {
     let mut out = HashMap::new();
     for chunk in symbols.chunks(MAX_SYMBOLS_PER_QUOTE_REQUEST) {
@@ -314,7 +316,7 @@ fn parse_betas(v: &Value) -> HashMap<String, f64> {
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|i| Some((i["symbol"].as_str()?.to_string(), i["fundamental"]["beta"].as_f64()?)))
+        .filter_map(|i| Some((i["symbol"].as_str()?.to_string(), i["fundamental"]["beta"].as_f64().filter(|&b| b != 0.0)?)))
         .collect()
 }
 
@@ -352,11 +354,13 @@ mod tests {
             {"assetType": "EQUITY", "symbol": "AAPL", "fundamental": {"beta": 1.08524, "peRatio": 38.18829}},
             {"assetType": "EQUITY", "symbol": "BRK/B", "fundamental": {"beta": 0.60253}},
             {"assetType": "EQUITY", "symbol": "NOBETA", "fundamental": {"peRatio": 10.0}},
+            {"assetType": "EQUITY", "symbol": "SNDK", "fundamental": {"beta": 0.0}},
         ]});
         let b = parse_betas(&v);
         assert_eq!(b.get("AAPL"), Some(&1.08524));
         assert_eq!(b.get("BRK/B"), Some(&0.60253));
         assert!(!b.contains_key("NOBETA"));
+        assert!(!b.contains_key("SNDK"));
     }
 
     #[test]

@@ -110,6 +110,18 @@ pub struct IndexerApp {
     pub(crate) av_pending: Vec<String>,
     pub(crate) av_notes: Vec<String>,
     pub(crate) av_used_today: u32,
+    /// Weekly closes by symbol (disk cache + this session's fetches).
+    pub(crate) history: HashMap<String, schwab::history::Series>,
+    pub(crate) risk_free: Remote<f64>,
+    /// Alpha/beta fits against the benchmark, refreshed as history or the
+    /// rate arrives.
+    pub(crate) fits: HashMap<String, schwab::risk::Fit>,
+    pub(crate) history_running: bool,
+    /// Symbols requested while a run was in progress; fetched next.
+    pub(crate) history_pending: Vec<String>,
+    /// (fetched, requested) in the current run.
+    pub(crate) history_progress: (usize, usize),
+    pub(crate) history_failed: Vec<String>,
     pub(crate) settings: Option<SettingsForm>,
     /// Bonds tab sort: (column, ascending); None = by maturity.
     pub(crate) bond_sort: Option<(usize, bool)>,
@@ -163,6 +175,13 @@ impl IndexerApp {
             av_pending: Vec::new(),
             av_notes: Vec::new(),
             av_used_today: av_cache.used_today(),
+            history: schwab::history::Cache::load().series,
+            risk_free: Remote::default(),
+            fits: HashMap::new(),
+            history_running: false,
+            history_pending: Vec::new(),
+            history_progress: (0, 0),
+            history_failed: Vec::new(),
             settings: None,
             bond_sort: None,
             plan: Default::default(),
@@ -216,6 +235,50 @@ impl IndexerApp {
     /// them while mutably borrowing other fields.
     pub(crate) fn names<'a>(&self, symbols: impl IntoIterator<Item = &'a String>) -> HashMap<String, String> {
         symbols.into_iter().map(|s| (s.clone(), self.display_name(s))).collect()
+    }
+
+    /// Fetch weekly price history (benchmark first) for symbols without fresh
+    /// cached data, plus the risk-free rate once per session.
+    pub(crate) fn fetch_history(&mut self, symbols: Vec<String>) {
+        use schwab::history::BENCHMARK;
+        let mut needed: Vec<String> = std::iter::once(BENCHMARK.to_string())
+            .chain(symbols)
+            .filter(|s| !self.history.get(s).is_some_and(|h| h.is_fresh()))
+            .collect();
+        needed.sort();
+        needed.dedup();
+        if let Some(i) = needed.iter().position(|s| s == BENCHMARK) {
+            needed.swap(0, i);
+        }
+        if self.history_running {
+            self.history_pending.extend(needed);
+            return;
+        }
+        let need_rate = self.risk_free.value.is_none() && !self.risk_free.loading;
+        if needed.is_empty() && !need_rate {
+            return;
+        }
+        if need_rate {
+            self.risk_free.start();
+        }
+        self.history_running = true;
+        self.history_progress = (0, needed.len());
+        self.worker.load_history(needed, need_rate);
+    }
+
+    fn refit(&mut self, symbol: &str) {
+        let (Some(&rf), Some(market)) = (self.risk_free.value.as_ref(), self.history.get(schwab::history::BENCHMARK)) else { return };
+        match self.history.get(symbol).and_then(|s| schwab::risk::fit(&s.closes, &market.closes, rf)) {
+            Some(f) => self.fits.insert(symbol.to_string(), f),
+            None => self.fits.remove(symbol),
+        };
+    }
+
+    fn refit_all(&mut self) {
+        let symbols: Vec<String> = self.history.keys().cloned().collect();
+        for s in symbols {
+            self.refit(&s);
+        }
     }
 
     /// Queue Alpha Vantage lookups for symbols without fresh cached data.
@@ -309,7 +372,32 @@ impl IndexerApp {
                 self.universe.finish(result);
                 self.load_market();
             }
-            Msg::MarketLoaded(result) => self.market.finish(result),
+            Msg::MarketLoaded(result) => {
+                self.market.finish(result);
+                if let Some(m) = &self.market.value {
+                    let symbols = m.keys().cloned().collect();
+                    self.fetch_history(symbols);
+                }
+            }
+            Msg::RiskFree(result) => {
+                self.risk_free.finish(result);
+                self.refit_all();
+            }
+            Msg::History(sym, series) => {
+                self.history.insert(sym.clone(), series);
+                self.history_progress.0 += 1;
+                if sym == schwab::history::BENCHMARK {
+                    self.refit_all();
+                } else {
+                    self.refit(&sym);
+                }
+            }
+            Msg::HistoryDone(failed) => {
+                self.history_running = false;
+                self.history_failed = failed;
+                let pending = std::mem::take(&mut self.history_pending);
+                self.fetch_history(pending);
+            }
             Msg::Exec(ev) => self.handle_exec(ev),
             Msg::Overview(sym, o) => {
                 self.overviews.insert(sym, o);

@@ -10,6 +10,7 @@ use schwab::api::MarketData;
 use schwab::basket::{self, Pick};
 use schwab::execution::PlannedOrder;
 use schwab::orders::Side;
+use schwab::risk::Fit;
 
 use crate::app::{money, IndexerApp};
 use crate::theme::{self, pal, Tone};
@@ -46,8 +47,8 @@ pub struct Review {
 }
 
 /// Review table headers; all but the trailing remove-button column sort.
-const REVIEW_COLUMNS: [&str; 16] = [
-    "Symbol", "Company", "Sector", "Div Yld", "P/E", "Fwd P/E", "Beta", "Target", "Upside", "Analysts", "Price", "Weight", "Share",
+const REVIEW_COLUMNS: [&str; 17] = [
+    "Symbol", "Company", "Sector", "Div Yld", "P/E", "Fwd P/E", "Beta", "Alpha", "Target", "Upside", "Analysts", "Price", "Weight", "Share",
     "Amount", "Shares", "",
 ];
 /// Columns 0..TEXT_COLUMNS sort alphabetically, the rest numerically.
@@ -304,6 +305,7 @@ impl IndexerApp {
         let names = self.names(&symbols);
         let overviews: HashMap<String, Overview> =
             symbols.iter().filter_map(|s| Some((s.clone(), self.overviews.get(s)?.clone()))).collect();
+        let fits: HashMap<String, Fit> = symbols.iter().filter_map(|s| Some((s.clone(), *self.fits.get(s)?))).collect();
         let (av_running, av_used, av_notes) = (self.av_running, self.av_used_today, self.av_notes.clone());
         let mut back = false;
         let mut add = None;
@@ -317,7 +319,7 @@ impl IndexerApp {
             // would be unusable.
             let editing = ui.ctx().egui_is_using_pointer() || ui.ctx().memory(|m| m.focused().is_some());
             if let (Some(sort), false) = (review.sort, editing) {
-                sort_lines(&mut review.lines, &market, &overviews, &names, sort);
+                sort_lines(&mut review.lines, &market, &overviews, &fits, &names, sort);
             }
             let weights: Vec<f64> = review.lines.iter().map(|l| l.weight_pct).collect();
             let prices: Vec<Option<f64>> = review.lines.iter().map(|l| market.get(&l.symbol).and_then(|m| m.price)).collect();
@@ -435,7 +437,7 @@ impl IndexerApp {
                         .column(Column::exact(72.0))
                         .column(Column::initial(230.0).clip(true))
                         .column(Column::initial(170.0))
-                        .columns(Column::initial(76.0), 6)
+                        .columns(Column::initial(76.0), 7)
                         .column(Column::initial(100.0))
                         .columns(Column::initial(88.0), 5)
                         .column(Column::exact(80.0))
@@ -451,6 +453,7 @@ impl IndexerApp {
                                         "Share" => "Weight rescaled so the basket totals 100%",
                                         "Fwd P/E" => "Price ÷ analysts' expected earnings (Alpha Vantage)",
                                         "Beta" => "How much it moves with the S&P 500: 1.0 = in step, 2.0 = twice as much (Schwab)",
+                                        "Alpha" => "Return per year beyond what beta explains (3 years weekly vs. SPY). Colored only when |t| ≥ 2.",
                                         "Target" => "Average analyst 12-month price target",
                                         "Upside" => "Target vs. current price",
                                         "Analysts" => "Share of analysts rating it Buy or Strong Buy",
@@ -491,6 +494,20 @@ impl IndexerApp {
                                     });
                                     row.col(|ui| {
                                         right(ui, fig(md.and_then(|m| m.beta).map(|v| format!("{v:.2}")).unwrap_or("—".into())));
+                                    });
+                                    row.col(|ui| match fits.get(&line.symbol) {
+                                        Some(f) => {
+                                            let color = match (f.significant(), f.alpha >= 0.0) {
+                                                (false, _) => p.muted,
+                                                (true, true) => p.gain,
+                                                (true, false) => p.loss,
+                                            };
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                ui.label(RichText::new(format!("{:+.1}%", f.alpha * 100.0)).font(theme::mono(12.5)).color(color))
+                                                    .on_hover_text(crate::home::fit_hint(f));
+                                            });
+                                        }
+                                        None => right(ui, fig("—".into())),
                                     });
                                     row.col(|ui| {
                                         right(ui, fig(ov.and_then(|o| o.target_price).map(|v| format!("{v:.2}")).unwrap_or(blank.into())));
@@ -625,6 +642,7 @@ fn sort_lines(
     lines: &mut [Line],
     market: &HashMap<String, MarketData>,
     overviews: &HashMap<String, Overview>,
+    fits: &HashMap<String, Fit>,
     names: &HashMap<String, String>,
     (col, ascending): (usize, bool),
 ) {
@@ -639,6 +657,7 @@ fn sort_lines(
             "P/E" => market.get(&l.symbol).and_then(|m| m.pe_ratio),
             "Fwd P/E" => ov(l).and_then(|o| o.forward_pe),
             "Beta" => market.get(&l.symbol).and_then(|m| m.beta),
+            "Alpha" => fits.get(&l.symbol).map(|f| f.alpha),
             "Target" => ov(l).and_then(|o| o.target_price),
             "Upside" => upside(ov(l), price(l)),
             "Analysts" => ov(l).and_then(Overview::buy_share),
