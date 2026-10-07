@@ -6,6 +6,7 @@ use crate::auth::get_valid_token;
 use crate::stream::QuoteUpdate;
 
 const QUOTES_URL: &str = "https://api.schwabapi.com/marketdata/v1/quotes";
+const INSTRUMENTS_URL: &str = "https://api.schwabapi.com/marketdata/v1/instruments";
 
 pub async fn get_quote(symbol: &str) -> Result<()> {
     let token = get_valid_token().await?;
@@ -205,6 +206,9 @@ pub struct MarketData {
     pub div_freq: Option<u32>,
     pub volume: Option<u64>,
     pub avg_volume_10d: Option<f64>,
+    /// Schwab's published beta vs. the S&P 500 (SPY ≈ 1.0). Only the
+    /// instruments endpoint has it — the quotes `fundamental` block doesn't.
+    pub beta: Option<f64>,
 }
 
 /// Fetch `MarketData` for any number of symbols, chunked under Schwab's
@@ -244,7 +248,52 @@ pub async fn fetch_market_data(token: &str, symbols: &[String]) -> Result<HashMa
             out.insert(key, parse_market_data(&entry));
         }
     }
+
+    // Beta is a nice-to-have: don't lose the whole table if this call fails.
+    match fetch_betas(token, &requested).await {
+        Ok(betas) => {
+            for (sym, beta) in betas {
+                let key = schwab_form.get(&sym).map(|s| s.to_string()).unwrap_or(sym);
+                if let Some(md) = out.get_mut(&key) {
+                    md.beta = Some(beta);
+                }
+            }
+        }
+        Err(e) => eprintln!("beta fetch failed: {e}"),
+    }
     Ok(out)
+}
+
+/// Beta per symbol from `instruments?projection=fundamental`, which takes a
+/// comma-separated batch and answers in Schwab's slash form (`BRK/B`).
+async fn fetch_betas(token: &str, symbols: &[String]) -> Result<HashMap<String, f64>> {
+    let mut out = HashMap::new();
+    for chunk in symbols.chunks(MAX_SYMBOLS_PER_QUOTE_REQUEST) {
+        let resp = reqwest::Client::new()
+            .get(INSTRUMENTS_URL)
+            .header("Authorization", format!("Bearer {}", token))
+            .query(&[("symbol", chunk.join(",").as_str()), ("projection", "fundamental")])
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            bail!("instruments fundamentals failed ({}): {}", status, body);
+        }
+
+        out.extend(parse_betas(&resp.json().await?));
+    }
+    Ok(out)
+}
+
+fn parse_betas(v: &Value) -> HashMap<String, f64> {
+    v["instruments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|i| Some((i["symbol"].as_str()?.to_string(), i["fundamental"]["beta"].as_f64()?)))
+        .collect()
 }
 
 fn parse_market_data(entry: &Value) -> MarketData {
@@ -266,5 +315,30 @@ fn parse_market_data(entry: &Value) -> MarketData {
         div_freq: f["divFreq"].as_u64().map(|v| v as u32),
         volume: q["totalVolume"].as_u64(),
         avg_volume_10d: fv(f, "avg10DaysVolume"),
+        beta: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parses_betas_from_live_shape() {
+        let v = json!({"instruments": [
+            {"assetType": "EQUITY", "symbol": "AAPL", "fundamental": {"beta": 1.08524, "peRatio": 38.18829}},
+            {"assetType": "EQUITY", "symbol": "BRK/B", "fundamental": {"beta": 0.60253}},
+            {"assetType": "EQUITY", "symbol": "NOBETA", "fundamental": {"peRatio": 10.0}},
+        ]});
+        let b = parse_betas(&v);
+        assert_eq!(b.get("AAPL"), Some(&1.08524));
+        assert_eq!(b.get("BRK/B"), Some(&0.60253));
+        assert!(!b.contains_key("NOBETA"));
+    }
+
+    #[test]
+    fn empty_instruments_reply_has_no_betas() {
+        assert!(parse_betas(&json!({})).is_empty());
     }
 }

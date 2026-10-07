@@ -46,8 +46,8 @@ pub struct Review {
 }
 
 /// Review table headers; all but the trailing remove-button column sort.
-const REVIEW_COLUMNS: [&str; 15] = [
-    "Symbol", "Company", "Sector", "Div Yld", "P/E", "Fwd P/E", "Target", "Upside", "Analysts", "Price", "Weight", "Share",
+const REVIEW_COLUMNS: [&str; 16] = [
+    "Symbol", "Company", "Sector", "Div Yld", "P/E", "Fwd P/E", "Beta", "Target", "Upside", "Analysts", "Price", "Weight", "Share",
     "Amount", "Shares", "",
 ];
 /// Columns 0..TEXT_COLUMNS sort alphabetically, the rest numerically.
@@ -423,7 +423,7 @@ impl IndexerApp {
                         .column(Column::exact(72.0))
                         .column(Column::initial(230.0).clip(true))
                         .column(Column::initial(170.0))
-                        .columns(Column::initial(76.0), 5)
+                        .columns(Column::initial(76.0), 6)
                         .column(Column::initial(100.0))
                         .columns(Column::initial(88.0), 5)
                         .column(Column::exact(80.0))
@@ -438,6 +438,7 @@ impl IndexerApp {
                                         "Weight" => "Your relative weight. Drag or type to change it.",
                                         "Share" => "Weight rescaled so the basket totals 100%",
                                         "Fwd P/E" => "Price ÷ analysts' expected earnings (Alpha Vantage)",
+                                        "Beta" => "How much it moves with the S&P 500: 1.0 = in step, 2.0 = twice as much (Schwab)",
                                         "Target" => "Average analyst 12-month price target",
                                         "Upside" => "Target vs. current price",
                                         "Analysts" => "Share of analysts rating it Buy or Strong Buy",
@@ -475,6 +476,9 @@ impl IndexerApp {
                                     let blank = if ov.is_none() && av_running { "…" } else { "—" };
                                     row.col(|ui| {
                                         right(ui, fig(ov.and_then(|o| o.forward_pe).map(|v| format!("{v:.1}")).unwrap_or(blank.into())));
+                                    });
+                                    row.col(|ui| {
+                                        right(ui, fig(md.and_then(|m| m.beta).map(|v| format!("{v:.2}")).unwrap_or("—".into())));
                                     });
                                     row.col(|ui| {
                                         right(ui, fig(ov.and_then(|o| o.target_price).map(|v| format!("{v:.2}")).unwrap_or(blank.into())));
@@ -622,6 +626,7 @@ fn sort_lines(
             "Div Yld" => market.get(&l.symbol).and_then(|m| m.div_yield),
             "P/E" => market.get(&l.symbol).and_then(|m| m.pe_ratio),
             "Fwd P/E" => ov(l).and_then(|o| o.forward_pe),
+            "Beta" => market.get(&l.symbol).and_then(|m| m.beta),
             "Target" => ov(l).and_then(|o| o.target_price),
             "Upside" => upside(ov(l), price(l)),
             "Analysts" => ov(l).and_then(Overview::buy_share),
