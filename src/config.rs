@@ -21,6 +21,9 @@ pub struct Config {
     /// Local HTML page shown in schwab-indexer's Plan tab.
     #[serde(default)]
     pub plan_page: Option<String>,
+    /// schwab-indexer's factor weights for ranking picks.
+    #[serde(default)]
+    pub factor_weights: Option<crate::factors::Weights>,
 }
 
 fn default_redirect_uri() -> String {
@@ -39,6 +42,7 @@ impl Default for Config {
             selected_account_hash: None,
             alphavantage_key: None,
             plan_page: None,
+            factor_weights: None,
         }
     }
 }

@@ -5,7 +5,7 @@ use std::cmp::Ordering;
 
 use eframe::egui::{self, CornerRadius, Margin, RichText, Stroke};
 use egui_extras::{Column, TableBuilder};
-use schwab::{api::MarketData, portfolio::Held, risk::Fit, universe::Constituent};
+use schwab::{api::MarketData, factors::Score, portfolio::Held, risk::Fit, universe::Constituent};
 
 use crate::app::{group_thousands, money, IndexerApp};
 use crate::modes::{Mode, DISCARD_HINT};
@@ -16,6 +16,7 @@ pub enum Col {
     Symbol,
     Name,
     Weight,
+    Score,
     Price,
     Change,
     Low52,
@@ -37,6 +38,7 @@ const COLUMNS: &[(Col, &str, &str)] = &[
     (Col::Symbol, "Symbol", ""),
     (Col::Name, "Name", ""),
     (Col::Weight, "Weight", "Share of the S&P 500 (share classes merged)"),
+    (Col::Score, "Score", "0–100 blend of value, quality, momentum and low beta vs. sector peers. Set the mix with the Ranking sliders in Create or Rebalance."),
     (Col::Price, "Price", ""),
     (Col::Change, "Chg %", "Change today"),
     (Col::Low52, "52w Low", ""),
@@ -69,6 +71,7 @@ struct Row<'a> {
     c: &'a Constituent,
     md: Option<&'a MarketData>,
     fit: Option<&'a Fit>,
+    score: Option<&'a Score>,
     held: Option<&'a Held>,
     dnt: bool,
     /// Ticked in the mode's selection column (Basket / Discard).
@@ -91,6 +94,7 @@ impl Row<'_> {
             Col::Pe => md?.pe_ratio,
             Col::Beta => md?.beta,
             Col::Alpha => self.fit.map(|f| f.alpha),
+            Col::Score => self.score.map(|s| s.total),
             Col::Yield => md?.div_yield,
             Col::Freq => md?.div_freq.map(f64::from),
             Col::Volume => md?.volume.map(|v| v as f64),
@@ -121,6 +125,21 @@ fn compare(a: &Row, b: &Row, sort: SortState) -> Ordering {
         },
     }
     .then_with(|| a.c.symbol.cmp(&b.c.symbol))
+}
+
+/// Score figure with a small bar, and the factor breakdown on hover.
+pub fn score_cell(ui: &mut egui::Ui, score: Option<&Score>) {
+    let p = pal(ui);
+    let Some(s) = score else {
+        right(ui, RichText::new("—").font(theme::mono(12.5)).color(p.ink));
+        return;
+    };
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let resp = ui.label(RichText::new(format!("{:.0}", s.total)).font(theme::mono_semibold(12.5)).color(p.ink));
+        theme::weight_bar(ui, (s.total / 100.0) as f32, 28.0);
+        resp.on_hover_text(s.breakdown());
+    });
 }
 
 /// Tooltip for an alpha figure: what it means and how much to trust it.
@@ -527,7 +546,7 @@ impl IndexerApp {
                     .map(|c| {
                         let md = market.get(&c.symbol);
                         let name = md.and_then(|m| m.description.as_deref()).unwrap_or("");
-                        Row { c, md, fit: self.fits.get(&c.symbol), held: self.held.get(&c.symbol), dnt: self.dnt.contains(&c.symbol), selected: false, selectable: false, name }
+                        Row { c, md, fit: self.fits.get(&c.symbol), score: self.scores.get(&c.symbol), held: self.held.get(&c.symbol), dnt: self.dnt.contains(&c.symbol), selected: false, selectable: false, name }
                     })
                     .collect();
                 let sort = self.sort.get(OTHER_SECTION).copied().unwrap_or(SortState { col: Col::Value, ascending: false });
@@ -573,7 +592,7 @@ impl IndexerApp {
                             .and_then(|o| o.name.as_deref())
                             .or_else(|| md.and_then(|m| m.description.as_deref()))
                             .unwrap_or("");
-                        Row { c, md, fit: self.fits.get(&c.symbol), held, dnt, selected, selectable, name }
+                        Row { c, md, fit: self.fits.get(&c.symbol), score: self.scores.get(&c.symbol), held, dnt, selected, selectable, name }
                     })
                     .collect();
                 let sort = self.sort.get(sector).copied().unwrap_or_default();
@@ -811,6 +830,7 @@ fn cell(ui: &mut egui::Ui, r: &Row, col: Col) {
         Col::Price | Col::Low52 | Col::High52 | Col::Eps => right(ui, figure(opt(r.num(col), |v| format!("{v:.2}")))),
         Col::Pe => right(ui, figure(opt(r.num(col), |v| format!("{v:.1}")))),
         Col::Beta => right(ui, figure(opt(r.num(col), |v| format!("{v:.2}")))),
+        Col::Score => score_cell(ui, r.score),
         Col::Alpha => match r.fit {
             Some(f) => {
                 let color = match (f.significant(), f.alpha >= 0.0) {

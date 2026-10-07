@@ -231,6 +231,22 @@ pub struct MarketData {
     /// Schwab's published beta vs. the S&P 500 (SPY ≈ 1.0). Only the
     /// instruments endpoint has it — the quotes `fundamental` block doesn't.
     pub beta: Option<f64>,
+    /// The rest are also instruments-only, in percent as Schwab reports
+    /// them. Schwab sends 0 for "unknown"; `factors` filters that out.
+    pub roe: Option<f64>,
+    pub net_margin: Option<f64>,
+    pub debt_to_equity: Option<f64>,
+    pub pcf_ratio: Option<f64>,
+}
+
+/// Fields only `instruments?projection=fundamental` has.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct InstrumentFundamentals {
+    beta: Option<f64>,
+    roe: Option<f64>,
+    net_margin: Option<f64>,
+    debt_to_equity: Option<f64>,
+    pcf_ratio: Option<f64>,
 }
 
 /// Fetch `MarketData` for any number of symbols, chunked under Schwab's
@@ -271,26 +287,28 @@ pub async fn fetch_market_data(token: &str, symbols: &[String]) -> Result<HashMa
         }
     }
 
-    // Beta is a nice-to-have: don't lose the whole table if this call fails.
-    match fetch_betas(token, &requested).await {
-        Ok(betas) => {
-            for (sym, beta) in betas {
+    // Nice-to-haves: don't lose the whole table if this call fails.
+    match fetch_fundamentals(token, &requested).await {
+        Ok(fundamentals) => {
+            for (sym, f) in fundamentals {
                 let key = schwab_form.get(&sym).map(|s| s.to_string()).unwrap_or(sym);
                 if let Some(md) = out.get_mut(&key) {
-                    md.beta = Some(beta);
+                    md.beta = f.beta;
+                    md.roe = f.roe;
+                    md.net_margin = f.net_margin;
+                    md.debt_to_equity = f.debt_to_equity;
+                    md.pcf_ratio = f.pcf_ratio;
                 }
             }
         }
-        Err(e) => eprintln!("beta fetch failed: {e}"),
+        Err(e) => eprintln!("instruments fundamentals failed: {e}"),
     }
     Ok(out)
 }
 
-/// Beta per symbol from `instruments?projection=fundamental`, which takes a
-/// comma-separated batch and answers in Schwab's slash form (`BRK/B`).
-/// Schwab sends exactly 0 when it has no beta (seen live on SNDK, a 2025
-/// spin-off), so 0 is treated as unknown.
-async fn fetch_betas(token: &str, symbols: &[String]) -> Result<HashMap<String, f64>> {
+/// Per-symbol fundamentals from `instruments?projection=fundamental`, which
+/// takes a comma-separated batch and answers in Schwab's slash form (`BRK/B`).
+async fn fetch_fundamentals(token: &str, symbols: &[String]) -> Result<HashMap<String, InstrumentFundamentals>> {
     let mut out = HashMap::new();
     for chunk in symbols.chunks(MAX_SYMBOLS_PER_QUOTE_REQUEST) {
         let resp = reqwest::Client::new()
@@ -306,17 +324,31 @@ async fn fetch_betas(token: &str, symbols: &[String]) -> Result<HashMap<String, 
             bail!("instruments fundamentals failed ({}): {}", status, body);
         }
 
-        out.extend(parse_betas(&resp.json().await?));
+        out.extend(parse_fundamentals(&resp.json().await?));
     }
     Ok(out)
 }
 
-fn parse_betas(v: &Value) -> HashMap<String, f64> {
+fn parse_fundamentals(v: &Value) -> HashMap<String, InstrumentFundamentals> {
     v["instruments"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|i| Some((i["symbol"].as_str()?.to_string(), i["fundamental"]["beta"].as_f64().filter(|&b| b != 0.0)?)))
+        .filter_map(|i| {
+            let f = &i["fundamental"];
+            let n = |k: &str| f[k].as_f64();
+            Some((
+                i["symbol"].as_str()?.to_string(),
+                InstrumentFundamentals {
+                    // Exactly 0 means "no beta" (seen live on SNDK, a 2025 spin-off).
+                    beta: n("beta").filter(|&b| b != 0.0),
+                    roe: n("returnOnEquity"),
+                    net_margin: n("netProfitMarginTTM"),
+                    debt_to_equity: n("totalDebtToEquity"),
+                    pcf_ratio: n("pcfRatio"),
+                },
+            ))
+        })
         .collect()
 }
 
@@ -339,7 +371,7 @@ fn parse_market_data(entry: &Value) -> MarketData {
         div_freq: f["divFreq"].as_u64().map(|v| v as u32),
         volume: q["totalVolume"].as_u64(),
         avg_volume_10d: fv(f, "avg10DaysVolume"),
-        beta: None,
+        ..Default::default()
     }
 }
 
@@ -349,18 +381,21 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn parses_betas_from_live_shape() {
+    fn parses_fundamentals_from_live_shape() {
         let v = json!({"instruments": [
-            {"assetType": "EQUITY", "symbol": "AAPL", "fundamental": {"beta": 1.08524, "peRatio": 38.18829}},
+            {"assetType": "EQUITY", "symbol": "AAPL", "fundamental": {"beta": 1.08524, "returnOnEquity": 148.751,
+                "netProfitMarginTTM": 27.6186, "totalDebtToEquity": 66.3504, "pcfRatio": 27.97984}},
             {"assetType": "EQUITY", "symbol": "BRK/B", "fundamental": {"beta": 0.60253}},
-            {"assetType": "EQUITY", "symbol": "NOBETA", "fundamental": {"peRatio": 10.0}},
             {"assetType": "EQUITY", "symbol": "SNDK", "fundamental": {"beta": 0.0}},
         ]});
-        let b = parse_betas(&v);
-        assert_eq!(b.get("AAPL"), Some(&1.08524));
-        assert_eq!(b.get("BRK/B"), Some(&0.60253));
-        assert!(!b.contains_key("NOBETA"));
-        assert!(!b.contains_key("SNDK"));
+        let f = parse_fundamentals(&v);
+        assert_eq!(
+            f["AAPL"],
+            InstrumentFundamentals { beta: Some(1.08524), roe: Some(148.751), net_margin: Some(27.6186), debt_to_equity: Some(66.3504), pcf_ratio: Some(27.97984) }
+        );
+        assert_eq!(f["BRK/B"].beta, Some(0.60253));
+        assert_eq!(f["BRK/B"].roe, None);
+        assert_eq!(f["SNDK"].beta, None);
     }
 
     #[test]
@@ -372,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_instruments_reply_has_no_betas() {
-        assert!(parse_betas(&json!({})).is_empty());
+    fn empty_instruments_reply_has_nothing() {
+        assert!(parse_fundamentals(&json!({})).is_empty());
     }
 }

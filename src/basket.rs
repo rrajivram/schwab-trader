@@ -5,7 +5,7 @@
 //! heaviest-first taking each sector's highest-scoring stock, and repeat
 //! (2nd highest, 3rd, ...) until the basket is full. Sectors that run out
 //! are skipped. The score is whatever the caller ranks by (the indexer uses
-//! EPS); stocks with no score are still eligible, ranked last.
+//! its factor score); stocks with no score are still eligible, ranked last.
 
 use std::collections::{HashMap, HashSet};
 
@@ -17,7 +17,7 @@ pub struct Pick {
     pub sector: String,
     /// Index weight rescaled over the non-excluded universe (fraction of 1).
     pub weight: f64,
-    /// The ranking metric (EPS in the indexer); None when unknown.
+    /// The ranking metric (factor score in the indexer); None when unknown.
     pub score: Option<f64>,
 }
 

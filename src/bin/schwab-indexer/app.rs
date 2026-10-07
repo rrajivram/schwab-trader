@@ -122,6 +122,9 @@ pub struct IndexerApp {
     /// (fetched, requested) in the current run.
     pub(crate) history_progress: (usize, usize),
     pub(crate) history_failed: Vec<String>,
+    /// Factor weights (saved in config) and the scores they produce.
+    pub(crate) weights: schwab::factors::Weights,
+    pub(crate) scores: HashMap<String, schwab::factors::Score>,
     pub(crate) settings: Option<SettingsForm>,
     /// Bonds tab sort: (column, ascending); None = by maturity.
     pub(crate) bond_sort: Option<(usize, bool)>,
@@ -182,6 +185,8 @@ impl IndexerApp {
             history_pending: Vec::new(),
             history_progress: (0, 0),
             history_failed: Vec::new(),
+            weights: Config::load().ok().and_then(|c| c.factor_weights).unwrap_or_default(),
+            scores: HashMap::new(),
             settings: None,
             bond_sort: None,
             plan: Default::default(),
@@ -281,6 +286,29 @@ impl IndexerApp {
         }
     }
 
+    /// Recompute factor scores for the index; cheap enough to run on every
+    /// input change (a few sorts over 500 stocks).
+    pub(crate) fn rescore(&mut self) {
+        let (Some(u), Some(m)) = (&self.universe.value, &self.market.value) else { return };
+        let stocks: Vec<_> = u
+            .constituents
+            .iter()
+            .map(|c| {
+                let closes = self.history.get(&c.symbol).map(|h| h.closes.as_slice());
+                let beta = self.fits.get(&c.symbol).map(|f| f.beta);
+                (c.symbol.clone(), c.sector.clone(), schwab::factors::Inputs::new(m.get(&c.symbol), closes, beta))
+            })
+            .collect();
+        self.scores = schwab::factors::score(&stocks, &self.weights);
+    }
+
+    pub(crate) fn save_weights(&self) {
+        if let Ok(mut c) = Config::load() {
+            c.factor_weights = Some(self.weights);
+            let _ = c.save();
+        }
+    }
+
     /// Queue Alpha Vantage lookups for symbols without fresh cached data.
     pub(crate) fn fetch_overviews(&mut self, symbols: Vec<String>) {
         let needed: Vec<String> = symbols
@@ -374,6 +402,7 @@ impl IndexerApp {
             }
             Msg::MarketLoaded(result) => {
                 self.market.finish(result);
+                self.rescore();
                 if let Some(m) = &self.market.value {
                     let symbols = m.keys().cloned().collect();
                     self.fetch_history(symbols);
@@ -382,6 +411,7 @@ impl IndexerApp {
             Msg::RiskFree(result) => {
                 self.risk_free.finish(result);
                 self.refit_all();
+                self.rescore();
             }
             Msg::History(sym, series) => {
                 self.history.insert(sym.clone(), series);
@@ -391,6 +421,7 @@ impl IndexerApp {
                 } else {
                     self.refit(&sym);
                 }
+                self.rescore();
             }
             Msg::HistoryDone(failed) => {
                 self.history_running = false;

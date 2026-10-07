@@ -10,11 +10,12 @@ use schwab::api::MarketData;
 use schwab::basket::{self, Pick};
 use schwab::execution::PlannedOrder;
 use schwab::orders::Side;
+use schwab::factors::{Score, Weights};
 use schwab::risk::Fit;
 
 use crate::app::{money, IndexerApp};
 use crate::theme::{self, pal, Tone};
-use crate::home::fmt_qty;
+use crate::home::{fmt_qty, score_cell};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -46,9 +47,17 @@ pub struct Review {
     pub confirm: Option<bool>,
 }
 
+/// Ranking factors and what goes into each.
+const FACTORS: [(&str, &str); 4] = [
+    ("Value", "Cheap vs. sector peers: earnings yield (1 / P/E) and cash-flow yield"),
+    ("Quality", "Profitable and not over-borrowed vs. sector peers: return on equity, net margin, low debt/equity"),
+    ("Momentum", "Price return from 12 months ago to 1 month ago, vs. sector peers"),
+    ("Low beta", "Moves less with the market than sector peers. Low-beta stocks have historically earned more than their risk predicts."),
+];
+
 /// Review table headers; all but the trailing remove-button column sort.
-const REVIEW_COLUMNS: [&str; 17] = [
-    "Symbol", "Company", "Sector", "Div Yld", "P/E", "Fwd P/E", "Beta", "Alpha", "Target", "Upside", "Analysts", "Price", "Weight", "Share",
+const REVIEW_COLUMNS: [&str; 18] = [
+    "Symbol", "Company", "Sector", "Score", "Div Yld", "P/E", "Fwd P/E", "Beta", "Alpha", "Target", "Upside", "Analysts", "Price", "Weight", "Share",
     "Amount", "Shares", "",
 ];
 /// Columns 0..TEXT_COLUMNS sort alphabetically, the rest numerically.
@@ -64,13 +73,9 @@ pub struct Line {
 }
 
 impl IndexerApp {
-    /// Auto's ranking metric: EPS.
-    fn eps_scores(&self) -> HashMap<String, f64> {
-        self.market
-            .value
-            .as_ref()
-            .map(|m| m.iter().filter_map(|(s, md)| Some((s.clone(), md.eps?))).collect())
-            .unwrap_or_default()
+    /// Auto's ranking metric: the factor score.
+    fn pick_scores(&self) -> HashMap<String, f64> {
+        self.scores.iter().map(|(s, sc)| (s.clone(), sc.total)).collect()
     }
 
     fn cash(&self) -> f64 {
@@ -113,7 +118,55 @@ impl IndexerApp {
     pub(crate) fn current_replacements(&self) -> Vec<Pick> {
         let Some(u) = &self.universe.value else { return Vec::new() };
         let sectors: Vec<String> = self.discards.iter().filter_map(|s| self.index_weight(s).map(|(_, sec)| sec)).collect();
-        basket::replacements(u, &self.eps_scores(), &self.auto_exclusions(), &sectors)
+        basket::replacements(u, &self.pick_scores(), &self.auto_exclusions(), &sectors)
+    }
+
+    /// Factor weight sliders, shared by Create and Rebalance. Rescores live
+    /// while dragging; saves to config when a change settles.
+    fn ranking_controls(&mut self, ui: &mut egui::Ui) {
+        let p = pal(ui);
+        let (mut changed, mut save) = (false, false);
+        ui.horizontal(|ui| {
+            ui.label(theme::eyebrow(ui, "Ranking"));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if self.weights != Weights::default() && ui.small_button("Equal weights").clicked() {
+                    self.weights = Weights::default();
+                    (changed, save) = (true, true);
+                }
+            });
+        });
+        let total: f64 = [self.weights.value, self.weights.quality, self.weights.momentum, self.weights.low_beta].iter().sum();
+        egui::Grid::new(ui.id().with("weights")).num_columns(3).spacing([8.0, 4.0]).show(ui, |ui| {
+            for (label, hint) in FACTORS {
+                let w = match label {
+                    "Value" => &mut self.weights.value,
+                    "Quality" => &mut self.weights.quality,
+                    "Momentum" => &mut self.weights.momentum,
+                    _ => &mut self.weights.low_beta,
+                };
+                ui.label(label).on_hover_text(hint);
+                ui.spacing_mut().slider_width = 130.0;
+                let r = ui.add(egui::Slider::new(w, 0.0..=100.0).show_value(false)).on_hover_text(hint);
+                changed |= r.changed();
+                save |= r.drag_stopped() || (r.changed() && !r.dragged());
+                let share = if total > 0.0 { *w / total * 100.0 } else { 0.0 };
+                ui.label(RichText::new(format!("{share:.0}%")).font(theme::mono(12.5)).color(p.muted));
+                ui.end_row();
+            }
+        });
+        if total <= 0.0 {
+            ui.label(RichText::new("Set at least one weight above 0.").color(p.warn));
+        } else {
+            let n = self.universe.value.as_ref().map_or(0, |u| u.constituents.len());
+            ui.label(RichText::new(format!("{} of {n} stocks scored against their sector", self.scores.len())).color(p.muted).font(theme::sans(theme::SMALL)))
+                .on_hover_text("A stock needs at least two factors with data to be scored. Momentum fills in as price history loads.");
+        }
+        if changed {
+            self.rescore();
+        }
+        if save {
+            self.save_weights();
+        }
     }
 
     fn side_frame(ui: &egui::Ui) -> egui::Frame {
@@ -146,12 +199,15 @@ impl IndexerApp {
             if self.max_pe_enabled {
                 ui.label(RichText::new(format!("{pe_passing} of the S&P 500 pass this limit")).color(p.muted).font(theme::sans(theme::SMALL)));
             }
+            ui.add_space(6.0);
+            self.ranking_controls(ui);
+            ui.add_space(4.0);
             let ready = self.market.value.is_some();
             auto = ui
                 .add_enabled_ui(ready, |ui| ui.add_sized([ui.available_width(), 32.0], theme::primary(ui, "Auto fill")))
                 .inner
                 .on_hover_text(
-                    "Skips blocked stocks and ones you hold, then takes the highest-EPS stock \
+                    "Skips blocked stocks and ones you hold, then takes the highest-scoring stock \
                      from each sector (heaviest sector first), then the 2nd highest, and so on.",
                 )
                 .on_disabled_hover_text("Waiting for quotes")
@@ -192,7 +248,7 @@ impl IndexerApp {
             if let Some(u) = &self.universe.value {
                 let mut exclude = self.auto_exclusions();
                 exclude.extend(self.pe_exclusions());
-                let picks = basket::auto_basket(u, &self.eps_scores(), &exclude, self.auto_size);
+                let picks = basket::auto_basket(u, &self.pick_scores(), &exclude, self.auto_size);
                 self.auto_note = (picks.len() < self.auto_size)
                     .then(|| format!("Only {} stocks qualify, so the basket has {}.", picks.len(), picks.len()));
                 self.basket = picks.into_iter().map(|p| p.symbol).collect();
@@ -225,8 +281,10 @@ impl IndexerApp {
 
             ui.add_space(8.0);
             ui.separator();
+            self.ranking_controls(ui);
+            ui.add_space(8.0);
             ui.label(theme::eyebrow(ui, "Replacements"));
-            ui.label(RichText::new("The highest-EPS stock in the next sector after each discard's.").color(p.muted).font(theme::sans(theme::SMALL)));
+            ui.label(RichText::new("The highest-scoring stock in the next sector after each discard's.").color(p.muted).font(theme::sans(theme::SMALL)));
             if replacements.is_empty() {
                 ui.label(RichText::new("—").color(p.muted));
             }
@@ -236,8 +294,8 @@ impl IndexerApp {
                     ui.label(RichText::new(&pick.symbol).font(theme::mono_semibold(theme::BODY)));
                     ui.add(egui::Label::new(RichText::new(&names[&pick.symbol]).color(p.ink)).truncate());
                 });
-                let eps = pick.score.map(|e| format!("{e:.2}")).unwrap_or("—".into());
-                ui.label(RichText::new(format!("replaces {discard} · {} · EPS {eps}", pick.sector)).color(p.muted).font(theme::sans(theme::SMALL)));
+                let score = pick.score.map(|e| format!("{e:.0}")).unwrap_or("—".into());
+                ui.label(RichText::new(format!("replaces {discard} · {} · score {score}", pick.sector)).color(p.muted).font(theme::sans(theme::SMALL)));
             }
             ui.add_space(8.0);
             ui.separator();
@@ -305,6 +363,7 @@ impl IndexerApp {
         let names = self.names(&symbols);
         let overviews: HashMap<String, Overview> =
             symbols.iter().filter_map(|s| Some((s.clone(), self.overviews.get(s)?.clone()))).collect();
+        let scores: HashMap<String, Score> = symbols.iter().filter_map(|s| Some((s.clone(), *self.scores.get(s)?))).collect();
         let fits: HashMap<String, Fit> = symbols.iter().filter_map(|s| Some((s.clone(), *self.fits.get(s)?))).collect();
         let (av_running, av_used, av_notes) = (self.av_running, self.av_used_today, self.av_notes.clone());
         let mut back = false;
@@ -319,7 +378,7 @@ impl IndexerApp {
             // would be unusable.
             let editing = ui.ctx().egui_is_using_pointer() || ui.ctx().memory(|m| m.focused().is_some());
             if let (Some(sort), false) = (review.sort, editing) {
-                sort_lines(&mut review.lines, &market, &overviews, &fits, &names, sort);
+                sort_lines(&mut review.lines, &market, &overviews, &fits, &scores, &names, sort);
             }
             let weights: Vec<f64> = review.lines.iter().map(|l| l.weight_pct).collect();
             let prices: Vec<Option<f64>> = review.lines.iter().map(|l| market.get(&l.symbol).and_then(|m| m.price)).collect();
@@ -437,7 +496,7 @@ impl IndexerApp {
                         .column(Column::exact(72.0))
                         .column(Column::initial(230.0).clip(true))
                         .column(Column::initial(170.0))
-                        .columns(Column::initial(76.0), 7)
+                        .columns(Column::initial(76.0), 8)
                         .column(Column::initial(100.0))
                         .columns(Column::initial(88.0), 5)
                         .column(Column::exact(80.0))
@@ -453,6 +512,7 @@ impl IndexerApp {
                                         "Share" => "Weight rescaled so the basket totals 100%",
                                         "Fwd P/E" => "Price ÷ analysts' expected earnings (Alpha Vantage)",
                                         "Beta" => "How much it moves with the S&P 500: 1.0 = in step, 2.0 = twice as much (Schwab)",
+                                        "Score" => "0–100 blend of value, quality, momentum and low beta vs. sector peers, weighted by the Ranking sliders",
                                         "Alpha" => "Return per year beyond what beta explains (3 years weekly vs. SPY). Colored only when |t| ≥ 2.",
                                         "Target" => "Average analyst 12-month price target",
                                         "Upside" => "Target vs. current price",
@@ -480,6 +540,7 @@ impl IndexerApp {
                                     row.col(|ui| {
                                         ui.label(RichText::new(&line.sector).color(p.muted));
                                     });
+                                    row.col(|ui| score_cell(ui, scores.get(&line.symbol)));
                                     row.col(|ui| {
                                         right(ui, fig(md.and_then(|m| m.div_yield).map(|y| format!("{y:.2}%")).unwrap_or("—".into())));
                                     });
@@ -643,6 +704,7 @@ fn sort_lines(
     market: &HashMap<String, MarketData>,
     overviews: &HashMap<String, Overview>,
     fits: &HashMap<String, Fit>,
+    scores: &HashMap<String, Score>,
     names: &HashMap<String, String>,
     (col, ascending): (usize, bool),
 ) {
@@ -658,6 +720,7 @@ fn sort_lines(
             "Fwd P/E" => ov(l).and_then(|o| o.forward_pe),
             "Beta" => market.get(&l.symbol).and_then(|m| m.beta),
             "Alpha" => fits.get(&l.symbol).map(|f| f.alpha),
+            "Score" => scores.get(&l.symbol).map(|s| s.total),
             "Target" => ov(l).and_then(|o| o.target_price),
             "Upside" => upside(ov(l), price(l)),
             "Analysts" => ov(l).and_then(Overview::buy_share),

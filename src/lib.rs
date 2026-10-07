@@ -11,6 +11,7 @@ pub mod bonds;
 pub mod config;
 pub mod dividends;
 pub mod execution;
+pub mod factors;
 pub mod history;
 pub mod indices;
 pub mod orders;
