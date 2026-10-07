@@ -335,6 +335,20 @@ impl IndexerApp {
                             theme::stat(ui, &format!("ETFs & funds · {n_funds}"), &money(funds), None);
                             theme::stat(ui, &format!("Bonds · {n_bonds}"), &money(bonds), None);
                             theme::stat(ui, "Account value", &money(acct.liquidation_value), Some(p.accent));
+                            let market = self.market.value.as_ref();
+                            let beta = schwab::risk::weighted_beta(
+                                self.held.iter().map(|(s, h)| (h.market_value, market.and_then(|m| m.get(s)).and_then(|m| m.beta))),
+                            );
+                            if let Some(b) = beta {
+                                let account = b.diluted(acct.liquidation_value).map(|a| format!("{a:.2}")).unwrap_or("—".into());
+                                theme::stat(ui, &format!("Beta · {} holdings", b.count), &format!("{:.2}", b.beta), None)
+                                    .on_hover_text(format!(
+                                        "Value-weighted beta of the {} stocks and ETFs with a Schwab beta ({}). \
+                                         If the market falls 10%, expect these to fall about {:.0}%.\n\n\
+                                         Counting cash and bonds as 0, the whole account's beta is {account}.",
+                                        b.count, money(b.covered), b.beta * 10.0
+                                    ));
+                            }
                             // Gain/loss only where Schwab reports a cost basis.
                             let known: Vec<f64> = self.held.values().filter_map(Held::gain).collect();
                             let unknown = self.held.len() - known.len();

@@ -253,13 +253,14 @@ pub fn card(ui: &egui::Ui) -> egui::Frame {
 }
 
 /// Label + figure, used in summary strips.
-pub fn stat(ui: &mut egui::Ui, label: &str, value: &str, color: Option<Color32>) {
+pub fn stat(ui: &mut egui::Ui, label: &str, value: &str, color: Option<Color32>) -> egui::Response {
     let p = pal(ui);
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 1.0;
         ui.label(eyebrow(ui, label));
         ui.label(RichText::new(value).font(mono_semibold(TITLE)).color(color.unwrap_or(p.ink)));
-    });
+    })
+    .response
 }
 
 /// A clickable column header that looks clickable: a stacked pair of

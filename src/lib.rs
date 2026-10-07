@@ -16,6 +16,7 @@ pub mod orders;
 pub mod portfolio;
 pub mod pricing;
 pub mod rebalance;
+pub mod risk;
 pub mod registry;
 pub mod stream;
 pub mod tui;

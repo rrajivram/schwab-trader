@@ -376,6 +376,18 @@ impl IndexerApp {
                     theme::stat(ui, "Stocks", &review.lines.len().to_string(), None);
                     theme::stat(ui, "Buys total", &money(spent), None);
                     theme::stat(ui, "Left over", &money(review.amount - spent), Some(p.muted));
+                    let beta = schwab::risk::weighted_beta(
+                        review.lines.iter().zip(&shares).map(|(l, &s)| (s, market.get(&l.symbol).and_then(|m| m.beta))),
+                    );
+                    match beta {
+                        Some(b) => theme::stat(ui, "Basket beta", &format!("{:.2}", b.beta), None).on_hover_text(format!(
+                            "Weighted by each stock's share of the basket ({} of {} have a Schwab beta). \
+                             1.0 moves with the S&P 500; above 1 swings more, below 1 less.",
+                            b.count,
+                            review.lines.len()
+                        )),
+                        None => theme::stat(ui, "Basket beta", "—", Some(p.muted)),
+                    };
                     if review.rebalance {
                         let sold: f64 = review.sells.iter().map(|(_, v)| v).sum();
                         theme::stat(ui, "Selling", &money(sold), Some(p.loss));
