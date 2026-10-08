@@ -187,6 +187,7 @@ impl IndexerApp {
             Mode::Execute => return self.execute_ui(ui),
             Mode::Bonds => return self.bonds_ui(ui),
             Mode::Plan => return self.plan_ui(ui, frame),
+            Mode::Backtest => return self.backtest_ui(ui),
             _ => {}
         }
         self.summary_strip(ui);
@@ -196,7 +197,7 @@ impl IndexerApp {
         match self.mode {
             Mode::Create => self.create_panel(ui),
             Mode::Rebalance => self.rebalance_panel(ui),
-            Mode::Browse | Mode::Review | Mode::Execute | Mode::Bonds | Mode::Plan => {}
+            Mode::Browse | Mode::Review | Mode::Execute | Mode::Bonds | Mode::Plan | Mode::Backtest => {}
         }
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(pal(ui).bg).inner_margin(Margin::symmetric(18, 10)))
@@ -322,6 +323,7 @@ impl IndexerApp {
                         (Mode::Create, "Create", "Build a new basket"),
                         (Mode::Rebalance, "Rebalance", "Replace holdings that are below cost"),
                         (Mode::Bonds, "Bonds", "Maturities and coupons coming your way"),
+                        (Mode::Backtest, "Backtest", "How the picking rule would have done over the past decade"),
                         (Mode::Plan, "Plan", "Your divestiture plan page"),
                     ] {
                         let label = if mode == Mode::Bonds && soon > 0 { format!("Bonds · {soon}") } else { label.to_string() };
@@ -583,7 +585,7 @@ impl IndexerApp {
                                 self.discards.contains(&c.symbol),
                                 !dnt && held.is_some_and(Held::is_losing),
                             ),
-                            Mode::Browse | Mode::Review | Mode::Execute | Mode::Bonds | Mode::Plan => (false, false),
+                            Mode::Browse | Mode::Review | Mode::Execute | Mode::Bonds | Mode::Plan | Mode::Backtest => (false, false),
                         };
                         let md = market.get(&c.symbol);
                         let name = self
@@ -661,7 +663,7 @@ fn sector_table(ui: &mut egui::Ui, sector: &str, rows: &[Row], sort: SortState, 
     let select = match mode {
         Mode::Create => Some(("Basket", "Add", "✓ In basket", "Click to remove from the basket")),
         Mode::Rebalance => Some(("Discard", "Discard", "✓ Discarding", "Click to keep this holding")),
-        Mode::Browse | Mode::Review | Mode::Execute | Mode::Bonds | Mode::Plan => None,
+        Mode::Browse | Mode::Review | Mode::Execute | Mode::Bonds | Mode::Plan | Mode::Backtest => None,
     };
     let p = pal(ui);
     let mut table = TableBuilder::new(ui)

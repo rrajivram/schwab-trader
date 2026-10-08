@@ -129,6 +129,7 @@ pub struct IndexerApp {
     /// Bonds tab sort: (column, ascending); None = by maturity.
     pub(crate) bond_sort: Option<(usize, bool)>,
     pub(crate) plan: crate::plan_tab::PlanView,
+    pub(crate) backtest: crate::backtest_tab::BacktestView,
 }
 
 pub struct SettingsForm {
@@ -163,6 +164,7 @@ impl IndexerApp {
             mode: match std::env::var("INDEXER_TAB").as_deref() {
                 Ok("bonds") => Mode::Bonds,
                 Ok("plan") => Mode::Plan,
+                Ok("backtest") => Mode::Backtest,
                 _ => Mode::Browse,
             },
             basket: Vec::new(),
@@ -190,6 +192,7 @@ impl IndexerApp {
             settings: None,
             bond_sort: None,
             plan: Default::default(),
+            backtest: Default::default(),
         }
     }
 
@@ -273,7 +276,9 @@ impl IndexerApp {
 
     fn refit(&mut self, symbol: &str) {
         let (Some(&rf), Some(market)) = (self.risk_free.value.as_ref(), self.history.get(schwab::history::BENCHMARK)) else { return };
-        match self.history.get(symbol).and_then(|s| schwab::risk::fit(&s.closes, &market.closes, rf)) {
+        // The table's alpha covers the latest 3 years; the cache holds 10 for backtests.
+        let market = schwab::history::tail(&market.closes, schwab::history::FIT_WEEKS);
+        match self.history.get(symbol).and_then(|s| schwab::risk::fit(&s.closes, market, rf)) {
             Some(f) => self.fits.insert(symbol.to_string(), f),
             None => self.fits.remove(symbol),
         };
@@ -423,6 +428,7 @@ impl IndexerApp {
                 }
                 self.rescore();
             }
+            Msg::Backtest(params, outcome) => self.finish_backtest(params, outcome.map(|o| *o)),
             Msg::HistoryDone(failed) => {
                 self.history_running = false;
                 self.history_failed = failed;

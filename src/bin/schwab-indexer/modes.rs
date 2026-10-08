@@ -29,6 +29,8 @@ pub enum Mode {
     Bonds,
     /// The local divestiture-plan page in a web view.
     Plan,
+    /// Replay the picking rule over past prices.
+    Backtest,
 }
 
 pub struct Review {

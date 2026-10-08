@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use schwab::{accounts, alphavantage, api, auth, dividends, execution, history, universe};
+use schwab::{accounts, alphavantage, api, auth, backtest, dividends, execution, history, universe};
 
 pub enum Msg {
     /// Startup token check: Ok means a usable (possibly refreshed) token exists.
@@ -34,6 +34,7 @@ pub enum Msg {
     History(String, history::Series),
     /// Price-history run finished; carries the symbols that failed.
     HistoryDone(Vec<String>),
+    Backtest(backtest::Params, Option<Box<backtest::Outcome>>),
 }
 
 pub struct Worker {
@@ -133,6 +134,24 @@ impl Worker {
                 ctx.request_repaint();
             })
             .await;
+        });
+    }
+
+    /// CPU-bound (thousands of small regressions), so off the async threads.
+    pub fn run_backtest(
+        &self,
+        universe: universe::Universe,
+        series: HashMap<String, Vec<(i64, f64)>>,
+        benchmark: Vec<(i64, f64)>,
+        params: backtest::Params,
+    ) {
+        self.spawn(async move {
+            let outcome = tokio::task::spawn_blocking(move || backtest::run(&universe, &series, &benchmark, &params))
+                .await
+                .ok()
+                .flatten()
+                .map(Box::new);
+            Msg::Backtest(params, outcome)
         });
     }
 

@@ -1,5 +1,6 @@
 //! Weekly closing prices from Schwab's pricehistory endpoint, for fitting
-//! alpha and beta. Closes are split-adjusted but price-only (no dividends).
+//! alpha and beta and for backtesting. Closes are split-adjusted but
+//! price-only (no dividends). Newer listings simply start later.
 //!
 //! One symbol per request, so a full S&P 500 load is ~500 requests: results
 //! are cached on disk for `CACHE_DAYS`.
@@ -14,7 +15,10 @@ use std::path::PathBuf;
 const PRICE_HISTORY_URL: &str = "https://api.schwabapi.com/marketdata/v1/pricehistory";
 /// The market every stock is regressed on.
 pub const BENCHMARK: &str = "SPY";
-pub const YEARS: u32 = 3;
+/// Enough for a multi-year backtest; alpha only uses the latest `FIT_WEEKS`.
+pub const YEARS: u32 = 10;
+/// Weekly closes used for the alpha/beta fit shown in the tables (3 years).
+pub const FIT_WEEKS: usize = 157;
 const CACHE_DAYS: i64 = 7;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,7 +43,8 @@ impl Cache {
     fn path() -> Result<PathBuf> {
         let dir = dirs::config_dir().context("Cannot locate config directory")?.join("schwab-cli");
         std::fs::create_dir_all(&dir)?;
-        Ok(dir.join("price-history-cache.json"))
+        // Named by span so the earlier 3-year cache isn't mistaken for 10.
+        Ok(dir.join("price-history-10y.json"))
     }
 
     pub fn load() -> Cache {
@@ -50,7 +55,7 @@ impl Cache {
             .unwrap_or_default()
     }
 
-    /// Compact JSON: ~150 points × 500 symbols.
+    /// Compact JSON: ~520 points × 500 symbols, a few MB.
     pub fn save(&self) -> Result<()> {
         std::fs::write(Self::path()?, serde_json::to_string(self)?)?;
         Ok(())
@@ -58,13 +63,14 @@ impl Cache {
 }
 
 /// `YEARS` of weekly closes for one symbol (dotted class tickers are sent in
-/// Schwab's slash form). Retries a couple of times on Schwab's rate limit.
+/// Schwab's slash form). Retries a couple of times on Schwab's rate limit
+/// and on transient failures (a truncated body was seen live on MMM).
 pub async fn fetch_weekly(token: &str, symbol: &str) -> Result<Series> {
     let years = YEARS.to_string();
     let schwab_symbol = symbol.replace('.', "/");
     let client = reqwest::Client::new();
     for attempt in 0.. {
-        let resp = client
+        let sent = client
             .get(PRICE_HISTORY_URL)
             .header("Authorization", format!("Bearer {}", token))
             .query(&[
@@ -75,7 +81,15 @@ pub async fn fetch_weekly(token: &str, symbol: &str) -> Result<Series> {
                 ("frequency", "1"),
             ])
             .send()
-            .await?;
+            .await;
+        let resp = match sent {
+            Ok(r) => r,
+            Err(_) if attempt < 2 => {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         let status = resp.status();
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt < 2 {
@@ -86,9 +100,18 @@ pub async fn fetch_weekly(token: &str, symbol: &str) -> Result<Series> {
             let body = resp.text().await.unwrap_or_default();
             bail!("price history for {symbol} failed ({status}): {body}");
         }
-        return Ok(Series { closes: parse_candles(&resp.json().await?), fetched_at: Utc::now() });
+        match resp.json::<Value>().await {
+            Ok(v) => return Ok(Series { closes: parse_candles(&v), fetched_at: Utc::now() }),
+            Err(_) if attempt < 2 => tokio::time::sleep(std::time::Duration::from_secs(2)).await,
+            Err(e) => return Err(e).with_context(|| format!("price history for {symbol}")),
+        }
     }
     unreachable!()
+}
+
+/// The last `n` closes (all of them if there are fewer).
+pub fn tail(closes: &[(i64, f64)], n: usize) -> &[(i64, f64)] {
+    &closes[closes.len().saturating_sub(n)..]
 }
 
 fn parse_candles(v: &Value) -> Vec<(i64, f64)> {

@@ -28,6 +28,10 @@ pub struct Palette {
     pub warn: Color32,
     pub warn_soft: Color32,
     pub neutral_soft: Color32,
+    /// Chart series in fixed order (blue, orange, aqua). Validated together
+    /// for color-blind separation on this palette's surface; the light aqua
+    /// is under 3:1 contrast, so charts using it carry direct labels.
+    pub series: [Color32; 3],
 }
 
 const fn hex(v: u32) -> Color32 {
@@ -52,6 +56,7 @@ pub const LIGHT: Palette = Palette {
     warn: hex(0xB7791F),
     warn_soft: hex(0xF7EDD8),
     neutral_soft: hex(0xECEEF0),
+    series: [hex(0x2A78D6), hex(0xEB6834), hex(0x1BAF7A)],
 };
 
 pub const DARK: Palette = Palette {
@@ -71,6 +76,7 @@ pub const DARK: Palette = Palette {
     warn: hex(0xE0A84A),
     warn_soft: hex(0x372B16),
     neutral_soft: hex(0x262E37),
+    series: [hex(0x3987E5), hex(0xD95926), hex(0x199E70)],
 };
 
 pub fn pal(ui: &egui::Ui) -> &'static Palette {
