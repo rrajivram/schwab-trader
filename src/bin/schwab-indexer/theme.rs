@@ -381,3 +381,32 @@ pub fn left_stripe(ui: &egui::Ui, color: Color32) {
     let stripe = egui::Rect::from_min_size(r.left_top(), Vec2::new(3.0, r.height()));
     ui.painter().rect_filled(stripe, CornerRadius::same(1), color);
 }
+
+/// Search field for stock lists: hint, a Clear button while it has text,
+/// Esc to clear. `shortcut` also focuses it on Cmd/Ctrl+F (one per screen).
+/// Returns true when the query changed.
+pub fn search_box(ui: &mut egui::Ui, query: &mut String, id_salt: &str, shortcut: bool) -> bool {
+    let p = pal(ui);
+    let id = egui::Id::new(("search", id_salt));
+    if shortcut && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
+        ui.memory_mut(|m| m.request_focus(id));
+    }
+    let before = query.clone();
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let resp = ui.add(
+            egui::TextEdit::singleline(query)
+                .id(id)
+                .hint_text(RichText::new("Search name or ticker").color(p.muted))
+                .desired_width(240.0),
+        );
+        let resp = if shortcut { resp.on_hover_text("Cmd+F to search, Esc to clear") } else { resp.on_hover_text("Esc to clear") };
+        if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            query.clear();
+        }
+        if !query.is_empty() && ui.small_button("Clear").clicked() {
+            query.clear();
+        }
+    });
+    *query != before
+}

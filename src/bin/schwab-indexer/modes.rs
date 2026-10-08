@@ -47,6 +47,8 @@ pub struct Review {
     pub sort: Option<(usize, bool)>,
     /// Confirm dialog open, holding its "preview only" checkbox state.
     pub confirm: Option<bool>,
+    /// Table search (ticker or name); filters the view, never the basket.
+    pub search: String,
 }
 
 /// Ranking factors and what goes into each.
@@ -348,6 +350,7 @@ impl IndexerApp {
             message: None,
             sort: None,
             confirm: None,
+            search: String::new(),
         });
         self.mode = Mode::Review;
         let symbols = self.review.as_ref().map(|r| r.lines.iter().map(|l| l.symbol.clone()).collect()).unwrap_or_default();
@@ -484,6 +487,14 @@ impl IndexerApp {
                 }
             });
             ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                theme::search_box(ui, &mut review.search, "review", true);
+                let shown = review.lines.iter().filter(|l| schwab::universe::matches_query(&review.search, &l.symbol, &names[&l.symbol], &[])).count();
+                if !review.search.trim().is_empty() {
+                    ui.label(RichText::new(format!("Showing {shown} of {}. Totals still cover the whole basket.", review.lines.len())).color(p.muted));
+                }
+            });
+            ui.add_space(4.0);
 
             let mut remove = None;
             let mut clicked_col = None;
@@ -529,6 +540,9 @@ impl IndexerApp {
                         })
                         .body(|mut body| {
                             for (i, line) in review.lines.iter_mut().enumerate() {
+                                if !schwab::universe::matches_query(&review.search, &line.symbol, &names[&line.symbol], &[]) {
+                                    continue;
+                                }
                                 let md = market.get(&line.symbol);
                                 let fig = |s: String| RichText::new(s).font(theme::mono(12.5)).color(p.ink);
                                 body.row(28.0, |mut row| {

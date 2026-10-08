@@ -26,11 +26,13 @@ pub struct BacktestView {
     /// Params of the shown outcome, to flag when the controls have moved on.
     pub ran: Option<Params>,
     pub error: Option<String>,
+    /// Rebalance-history search (ticker or name).
+    pub search: String,
 }
 
 impl Default for BacktestView {
     fn default() -> Self {
-        Self { size: 20, every_weeks: 13, momentum_pct: 50.0, running: false, outcome: None, ran: None, error: None }
+        Self { size: 20, every_weeks: 13, momentum_pct: 50.0, running: false, outcome: None, ran: None, error: None, search: String::new() }
     }
 }
 
@@ -91,7 +93,8 @@ impl IndexerApp {
                     chart_card(ui, o);
                     metrics_card(ui, o);
                     caveats_card(ui, o);
-                    rebalances_card(ui, o, &self.names_all(o));
+                    let names = self.names_all(o);
+                    rebalances_card(ui, o, &names, &mut self.backtest.search);
                 } else if !ready {
                     theme::card(ui).show(ui, |ui| {
                         ui.horizontal(|ui| {
@@ -395,8 +398,9 @@ fn caveats_card(ui: &mut egui::Ui, o: &Outcome) {
     });
 }
 
-fn rebalances_card(ui: &mut egui::Ui, o: &Outcome, names: &std::collections::HashMap<String, String>) {
+fn rebalances_card(ui: &mut egui::Ui, o: &Outcome, names: &std::collections::HashMap<String, String>, query: &mut String) {
     let p = pal(ui);
+    let hit = |s: &String, q: &str| schwab::universe::matches_query(q, s, names.get(s).map_or("", String::as_str), &[]);
     theme::card(ui).inner_margin(Margin::symmetric(14, 8)).show(ui, |ui| {
         let id = ui.make_persistent_id("backtest_rebalances");
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
@@ -405,14 +409,24 @@ fn rebalances_card(ui: &mut egui::Ui, o: &Outcome, names: &std::collections::Has
                 ui.label(RichText::new(format!("{} rebalances, newest first", o.rebalances.len())).color(p.muted));
             })
             .body_unindented(|ui| {
-                for r in o.rebalances.iter().rev() {
+                theme::search_box(ui, query, "backtest", true);
+                let q = query.trim().to_string();
+                let searching = !q.is_empty();
+                let shown: Vec<_> = o.rebalances.iter().rev().filter(|r| !searching || r.picks.iter().any(|s| hit(s, &q))).collect();
+                if searching {
+                    ui.label(RichText::new(format!("Held in {} of {} rebalances", shown.len(), o.rebalances.len())).color(p.muted));
+                }
+                ui.add_space(4.0);
+                for r in shown {
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
                         ui.label(RichText::new(date(r.date)).font(theme::mono_semibold(12.5)).color(p.ink));
                         ui.label(RichText::new(format!("traded {:.0}%", r.turnover * 100.0)).color(p.muted).font(theme::sans(theme::SMALL)));
                         for s in &r.picks {
+                            let lit = searching && hit(s, &q);
                             let resp = egui::Frame::new()
-                                .fill(p.neutral_soft)
+                                .fill(if lit { p.accent_soft } else { p.neutral_soft })
+                                .stroke(if lit { Stroke::new(1.0, p.accent) } else { Stroke::NONE })
                                 .corner_radius(CornerRadius::same(4))
                                 .inner_margin(Margin::symmetric(5, 1))
                                 .show(ui, |ui| ui.label(RichText::new(s).font(theme::mono(12.0)).color(p.ink)))

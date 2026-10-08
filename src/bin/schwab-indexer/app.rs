@@ -90,6 +90,8 @@ pub struct IndexerApp {
     pub(crate) dnt_error: Option<String>,
     pub(crate) show_dnt_panel: bool,
     pub(crate) sort: HashMap<String, SortState>,
+    /// Home list search (ticker or name).
+    pub(crate) search: String,
     pub(crate) mode: Mode,
     /// Create mode: chosen symbols, in the order added.
     pub(crate) basket: Vec<String>,
@@ -160,6 +162,7 @@ impl IndexerApp {
             dnt_error,
             show_dnt_panel: false,
             sort: HashMap::new(),
+            search: String::new(),
             // INDEXER_TAB=bonds|plan opens straight onto that tab.
             mode: match std::env::var("INDEXER_TAB").as_deref() {
                 Ok("bonds") => Mode::Bonds,

@@ -514,6 +514,10 @@ impl IndexerApp {
 
     fn sectors_ui(&mut self, ui: &mut egui::Ui) {
         let p = pal(ui);
+        if self.universe.value.is_some() {
+            theme::search_box(ui, &mut self.search, "home", true);
+            ui.add_space(6.0);
+        }
         let Some(universe) = &self.universe.value else {
             if self.universe.loading {
                 ui.horizontal(|ui| {
@@ -538,13 +542,25 @@ impl IndexerApp {
             .map(|s| Constituent { symbol: s.clone(), sector: OTHER_SECTION.to_string(), weight: 0.0, merged: Vec::new() })
             .collect();
 
+        // Search covers both names a stock may show (Alpha Vantage's and Schwab's).
+        let query = self.search.trim();
+        let searching = !query.is_empty();
+        let hit = |c: &Constituent| {
+            let av = self.overviews.get(&c.symbol).and_then(|o| o.name.as_deref()).unwrap_or("");
+            let schwab = market.get(&c.symbol).and_then(|m| m.description.as_deref()).unwrap_or("");
+            schwab::universe::matches_query(query, &c.symbol, &format!("{av} {schwab}"), &c.merged)
+        };
+        let mut matched = 0;
+
         egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 10.0;
             // Holdings outside the S&P 500 (ETFs, funds, other stocks) get their
             // own card, laid out like a sector.
+            let others: Vec<&Constituent> = others.iter().filter(|c| hit(c)).collect();
             if matches!(self.mode, Mode::Browse | Mode::Rebalance) && !others.is_empty() {
+                matched += others.len();
                 let mut rows: Vec<Row> = others
-                    .iter()
+                    .into_iter()
                     .map(|c| {
                         let md = market.get(&c.symbol);
                         let name = md.and_then(|m| m.description.as_deref()).unwrap_or("");
@@ -555,13 +571,14 @@ impl IndexerApp {
                 rows.sort_by(|a, b| compare(a, b, sort));
                 let value: f64 = rows.iter().filter_map(|r| r.held).map(|h| h.market_value).sum();
                 theme::card(ui).inner_margin(Margin::symmetric(14, 8)).show(ui, |ui| {
-                    let id = ui.make_persistent_id(("sector", OTHER_SECTION));
+                    let id = ui.make_persistent_id(("sector", OTHER_SECTION, searching));
                     egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true)
                         .show_header(ui, |ui| {
                             ui.label(RichText::new(OTHER_SECTION).font(theme::sans_semibold(theme::TITLE)).color(p.ink));
                             ui.add_space(8.0);
                             ui.label(RichText::new(money(value)).font(theme::mono_medium(theme::BODY)));
-                            ui.label(RichText::new(format!("{} positions outside the S&P 500", rows.len())).color(p.muted));
+                            let what = if searching { "matching" } else { "outside the S&P 500" };
+                            ui.label(RichText::new(format!("{} positions {what}", rows.len())).color(p.muted));
                         })
                         .body_unindented(|ui| {
                             ui.add_space(4.0);
@@ -575,7 +592,7 @@ impl IndexerApp {
                 let mut rows: Vec<Row> = universe
                     .constituents
                     .iter()
-                    .filter(|c| &c.sector == sector)
+                    .filter(|c| &c.sector == sector && hit(c))
                     .map(|c| {
                         let held = self.held.get(&c.symbol);
                         let dnt = self.dnt.contains(&c.symbol);
@@ -597,6 +614,10 @@ impl IndexerApp {
                         Row { c, md, fit: self.fits.get(&c.symbol), score: self.scores.get(&c.symbol), held, dnt, selected, selectable, name }
                     })
                     .collect();
+                if rows.is_empty() {
+                    continue;
+                }
+                matched += rows.len();
                 let sort = self.sort.get(sector).copied().unwrap_or_default();
                 rows.sort_by(|a, b| compare(a, b, sort));
                 // Browse and Rebalance: held positions always lead their sector.
@@ -609,14 +630,17 @@ impl IndexerApp {
                 let n_selected = rows.iter().filter(|r| r.selected).count();
 
                 theme::card(ui).inner_margin(Margin::symmetric(14, 8)).show(ui, |ui| {
-                    let id = ui.make_persistent_id(("sector", sector.as_str()));
-                    egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
+                    // While searching, sectors open by default under a separate id,
+                    // so clearing the search restores what you had open.
+                    let id = ui.make_persistent_id(("sector", sector.as_str(), searching));
+                    egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, searching)
                         .show_header(ui, |ui| {
                             ui.label(RichText::new(sector.as_str()).font(theme::sans_semibold(theme::TITLE)).color(p.ink));
                             ui.add_space(8.0);
                             theme::weight_bar(ui, (*sector_weight / max_weight) as f32, 110.0);
                             ui.label(RichText::new(format!("{:.1}%", sector_weight * 100.0)).font(theme::mono_medium(theme::BODY)));
-                            ui.label(RichText::new(format!("{} stocks", rows.len())).color(p.muted));
+                            let noun = if searching { "matching" } else { "stocks" };
+                            ui.label(RichText::new(format!("{} {noun}", rows.len())).color(p.muted));
                             if n_held > 0 {
                                 let all_unknown = rows.iter().filter_map(|r| r.held).all(|h| h.cost_unknown);
                                 let tone = if n_losing > 0 { Tone::Loss } else if all_unknown { Tone::Neutral } else { Tone::Gain };
@@ -632,6 +656,9 @@ impl IndexerApp {
                             sector_table(ui, sector, &rows, sort, self.mode, &mut actions);
                         });
                 });
+            }
+            if searching && matched == 0 {
+                ui.label(RichText::new(format!("No stocks match \"{query}\".")).color(p.muted));
             }
         });
 

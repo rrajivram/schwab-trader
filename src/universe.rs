@@ -196,9 +196,39 @@ fn load_fallback_sectors() -> Result<HashMap<String, String>> {
     Ok(map)
 }
 
+/// Search match on a stock's ticker or name: case-insensitive, every
+/// whitespace-separated term must appear in one of them, and ticker
+/// punctuation is ignored (so `brk.b`, `BRK-B` and `brk/b` all find BRK.B).
+/// `also` takes extra tickers that count as this stock's (merged classes).
+pub fn matches_query(query: &str, symbol: &str, name: &str, also: &[String]) -> bool {
+    let squash = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+    let tickers: Vec<String> = std::iter::once(symbol).chain(also.iter().map(String::as_str)).map(squash).collect();
+    let name = name.to_lowercase();
+    query.split_whitespace().all(|term| {
+        let t = term.to_lowercase();
+        let tq = squash(term);
+        name.contains(&t) || (!tq.is_empty() && tickers.iter().any(|k| k.contains(&tq)))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_matches_ticker_or_name() {
+        let m = |q: &str| matches_query(q, "BRK.B", "Berkshire Hathaway Inc", &[]);
+        assert!(m(""), "empty query matches everything");
+        assert!(m("brk"));
+        assert!(m("BRK-B") && m("brk/b") && m("brk.b"));
+        assert!(m("berkshire"));
+        assert!(m("hath inc"), "every term, any field");
+        assert!(!m("berkshire apple"));
+        assert!(!m("msft"));
+        // Merged share classes count as the stock's tickers.
+        assert!(matches_query("goog", "GOOGL", "Alphabet Inc", &["GOOG".into()]));
+        assert!(!matches_query(".", "A", "Agilent", &[]), "punctuation alone isn't a ticker search");
+    }
 
     fn h(symbol: &str, weight: f64) -> Holding {
         Holding { symbol: symbol.into(), weight }
