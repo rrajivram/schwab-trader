@@ -77,7 +77,11 @@ impl<T> Remote<T> {
 pub struct IndexerApp {
     pub(crate) worker: Worker,
     screen: Screen,
+    /// The equities account (last digits from config, default 343): Home,
+    /// Create, Rebalance, dividends and every order use only this one.
     pub(crate) account: Remote<Account>,
+    /// Every linked account, for the Bonds tab.
+    pub(crate) accounts: Remote<Vec<Account>>,
     pub(crate) universe: Remote<Universe>,
     pub(crate) market: Remote<HashMap<String, MarketData>>,
     pub(crate) dividends: Remote<HashMap<String, f64>>,
@@ -153,6 +157,7 @@ impl IndexerApp {
             worker,
             screen: Screen::Starting,
             account: Remote::default(),
+            accounts: Remote::default(),
             universe: Remote::default(),
             market: Remote::default(),
             dividends: Remote::default(),
@@ -211,7 +216,8 @@ impl IndexerApp {
 
     pub(crate) fn load_account(&mut self) {
         self.account.start();
-        self.worker.load_account();
+        self.accounts.start();
+        self.worker.load_accounts();
     }
 
     pub(crate) fn load_universe(&mut self, force: bool) {
@@ -386,8 +392,11 @@ impl IndexerApp {
                     form.error = Some(e);
                 }
             }
-            Msg::AccountLoaded(result) => {
-                self.account.finish(result);
+            Msg::AccountsLoaded(result) => {
+                let suffix = Config::load().map(|c| c.equities_account()).unwrap_or_else(|_| schwab::config::DEFAULT_EQUITIES_ACCOUNT.to_string());
+                let equities = result.clone().and_then(|all| schwab::accounts::by_suffix(&all, &suffix).cloned());
+                self.accounts.finish(result);
+                self.account.finish(equities);
                 self.rebuild_held();
                 // New holdings outside the index need quotes too.
                 let missing = self.market.value.as_ref().is_some_and(|m| self.held.keys().any(|s| !m.contains_key(s)));

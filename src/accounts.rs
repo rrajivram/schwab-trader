@@ -55,6 +55,23 @@ pub struct Account {
     pub positions: Vec<Position>,
 }
 
+/// "···1343": enough to tell accounts apart without showing the full number.
+pub fn masked(number: &str) -> String {
+    format!("···{}", &number[number.len().saturating_sub(4)..])
+}
+
+/// The one account whose number ends in `suffix`. An error says why not,
+/// naming what is there, so a wrong setting is easy to fix.
+pub fn by_suffix<'a>(accounts: &'a [Account], suffix: &str) -> std::result::Result<&'a Account, String> {
+    let found: Vec<&Account> = accounts.iter().filter(|a| a.account_number.ends_with(suffix)).collect();
+    let have = || accounts.iter().map(|a| masked(&a.account_number)).collect::<Vec<_>>().join(", ");
+    match found.as_slice() {
+        [one] => Ok(one),
+        [] => Err(format!("No account ending in {suffix}. Accounts available: {}", have())),
+        _ => Err(format!("More than one account ends in {suffix} ({}); use more digits.", have())),
+    }
+}
+
 /// List linked accounts (account number + the encrypted hash Schwab requires
 /// in place of the plain account number on every other accounts/orders endpoint).
 pub async fn list_account_numbers() -> Result<Vec<AccountNumberHash>> {
@@ -153,4 +170,30 @@ pub async fn list_accounts() -> Result<Vec<Account>> {
         }
     }
     Ok(accounts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn acct(n: &str) -> Account {
+        Account { account_number: n.into(), hash_value: format!("h{n}"), account_type: "CASH".into(), cash_balance: 0.0, liquidation_value: 0.0, positions: vec![] }
+    }
+
+    #[test]
+    fn picks_the_account_by_its_last_digits() {
+        let all = [acct("11112222"), acct("33334343"), acct("55556666")];
+        assert_eq!(by_suffix(&all, "343").unwrap().account_number, "33334343");
+        let err = by_suffix(&all, "999").unwrap_err();
+        assert!(err.contains("No account ending in 999") && err.contains("···2222"), "{err}");
+        let dup = [acct("1343"), acct("2343")];
+        assert!(by_suffix(&dup, "343").unwrap_err().contains("More than one"));
+        assert_eq!(by_suffix(&dup, "1343").unwrap().account_number, "1343");
+    }
+
+    #[test]
+    fn masks_all_but_the_last_four() {
+        assert_eq!(masked("12345678"), "···5678");
+        assert_eq!(masked("12"), "···12");
+    }
 }

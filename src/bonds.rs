@@ -20,6 +20,8 @@ pub struct Bond {
     pub maturity: NaiveDate,
     pub cost: f64,
     pub market_value: f64,
+    /// Number of the account holding it (bonds are gathered across accounts).
+    pub account: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +41,7 @@ pub struct Payment {
     /// is a weekend or federal holiday.
     pub paid: NaiveDate,
     pub amount: f64,
+    pub account: String,
 }
 
 impl Bond {
@@ -55,6 +58,7 @@ impl Bond {
             maturity: p.maturity_date?,
             cost: face * p.average_price / 100.0,
             market_value: p.market_value,
+            account: String::new(),
         })
     }
 
@@ -97,6 +101,7 @@ impl Bond {
             scheduled,
             paid: next_business_day(scheduled),
             amount,
+            account: self.account.clone(),
         };
         let mut out: Vec<Payment> =
             self.coupon_dates(today).into_iter().map(|d| make(PaymentKind::Coupon, d, self.coupon_amount())).collect();
@@ -112,7 +117,17 @@ impl Bond {
 }
 
 pub fn bonds_in(account: &Account) -> Vec<Bond> {
-    account.positions.iter().filter_map(Bond::from_position).collect()
+    account
+        .positions
+        .iter()
+        .filter_map(Bond::from_position)
+        .map(|b| Bond { account: account.account_number.clone(), ..b })
+        .collect()
+}
+
+/// Bonds across every account, each tagged with its account.
+pub fn bonds_in_all(accounts: &[Account]) -> Vec<Bond> {
+    accounts.iter().flat_map(bonds_in).collect()
 }
 
 /// All upcoming payments across bonds, by the date the cash arrives.
@@ -199,7 +214,16 @@ mod tests {
             maturity,
             cost: 0.0,
             market_value: 0.0,
+            account: "12340343".into(),
         }
+    }
+
+    #[test]
+    fn payments_carry_their_bonds_account() {
+        let b = bond(4.0, ymd(2027, 6, 30));
+        let pays = b.payments(ymd(2026, 10, 9));
+        assert!(!pays.is_empty());
+        assert!(pays.iter().all(|p| p.account == "12340343"));
     }
 
     #[test]

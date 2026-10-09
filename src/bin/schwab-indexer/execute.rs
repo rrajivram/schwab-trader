@@ -136,6 +136,7 @@ impl IndexerApp {
             return None;
         }
         review.confirm = None;
+        let account_number = self.account.value.as_ref()?.account_number.clone();
         Some(Plan {
             preview,
             planned_proceeds: if review.rebalance { sell_total } else { 0.0 },
@@ -143,6 +144,7 @@ impl IndexerApp {
             sells,
             buys,
             do_not_transact: self.dnt.iter().cloned().collect(),
+            account_number,
         })
     }
 

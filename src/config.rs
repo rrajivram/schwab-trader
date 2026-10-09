@@ -24,7 +24,14 @@ pub struct Config {
     /// schwab-indexer's factor weights for ranking picks.
     #[serde(default)]
     pub factor_weights: Option<crate::factors::Weights>,
+    /// Last digits of the account schwab-indexer trades and shows equities
+    /// for (bonds come from every account). See `equities_account()`.
+    #[serde(default)]
+    pub equities_account: Option<String>,
 }
+
+/// The equities account's last digits when config doesn't set one.
+pub const DEFAULT_EQUITIES_ACCOUNT: &str = "343";
 
 fn default_redirect_uri() -> String {
     "https://127.0.0.1".to_string()
@@ -43,11 +50,16 @@ impl Default for Config {
             alphavantage_key: None,
             plan_page: None,
             factor_weights: None,
+            equities_account: None,
         }
     }
 }
 
 impl Config {
+    pub fn equities_account(&self) -> String {
+        self.equities_account.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| DEFAULT_EQUITIES_ACCOUNT.to_string())
+    }
+
     fn path() -> Result<PathBuf> {
         let dir = dirs::config_dir()
             .context("Cannot locate config directory")?

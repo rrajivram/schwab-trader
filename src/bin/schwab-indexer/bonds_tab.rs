@@ -1,11 +1,13 @@
 //! Bonds tab: what each bond pays back and when — maturities and remaining
-//! coupons, soonest first — plus a sortable holdings table.
+//! coupons, soonest first — plus a sortable holdings table. Covers every
+//! linked account (unlike the equity screens), labelling which holds what.
 
 use std::cmp::Ordering;
 
 use chrono::{Local, NaiveDate};
 use eframe::egui::{self, Margin, RichText};
 use egui_extras::{Column, TableBuilder};
+use schwab::accounts::masked;
 use schwab::bonds::{self, Bond, PaymentKind};
 
 use crate::app::{money, IndexerApp};
@@ -14,8 +16,8 @@ use crate::theme::{self, pal, Tone};
 /// Payments this close are called out.
 pub const SOON_DAYS: i64 = 30;
 
-const HOLDING_COLUMNS: [&str; 11] = [
-    "Bond", "CUSIP", "Coupon", "Matures", "Days left", "Face", "Cost", "Market value", "Coupons left", "Total to receive",
+const HOLDING_COLUMNS: [&str; 12] = [
+    "Bond", "CUSIP", "Account", "Coupon", "Matures", "Days left", "Face", "Cost", "Market value", "Coupons left", "Total to receive",
     "Gain to maturity",
 ];
 
@@ -25,9 +27,9 @@ pub fn today() -> NaiveDate {
 
 /// Payments arriving within `SOON_DAYS`, for the tab badge.
 pub fn soon_count(app: &IndexerApp) -> usize {
-    let Some(acct) = &app.account.value else { return 0 };
+    let Some(all) = &app.accounts.value else { return 0 };
     let t = today();
-    bonds::upcoming(&bonds::bonds_in(acct), t)
+    bonds::upcoming(&bonds::bonds_in_all(all), t)
         .iter()
         .filter(|p| (p.paid - t).num_days() <= SOON_DAYS)
         .count()
@@ -46,23 +48,31 @@ impl IndexerApp {
         let p = pal(ui);
         let frame = egui::Frame::new().fill(p.bg).inner_margin(Margin::symmetric(18, 14));
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
-            let Some(acct) = &self.account.value else {
+            let Some(all) = &self.accounts.value else {
                 ui.horizontal(|ui| {
-                    if self.account.loading {
+                    if self.accounts.loading {
                         ui.spinner();
-                        ui.label("Loading your account…");
+                        ui.label("Loading your accounts…");
                     } else {
-                        ui.label("No account loaded.");
+                        ui.label(self.accounts.error.as_deref().unwrap_or("No accounts loaded."));
                     }
                 });
                 return;
             };
             let t = today();
-            let held = bonds::bonds_in(acct);
+            let held = bonds::bonds_in_all(all);
             if held.is_empty() {
-                ui.label(RichText::new("No bonds in this account.").color(p.muted));
+                ui.label(RichText::new(format!("No bonds in any of your {} accounts.", all.len())).color(p.muted));
                 return;
             }
+            // Accounts holding bonds, in account order: (number, bonds, market value).
+            let by_account: Vec<(String, usize, f64)> = all
+                .iter()
+                .filter_map(|a| {
+                    let bs: Vec<&Bond> = held.iter().filter(|b| b.account == a.account_number).collect();
+                    (!bs.is_empty()).then(|| (a.account_number.clone(), bs.len(), bs.iter().map(|b| b.market_value).sum()))
+                })
+                .collect();
             let pays = bonds::upcoming(&held, t);
             let within = |d: i64| pays.iter().filter(|x| (x.paid - t).num_days() <= d).map(|x| x.amount).sum::<f64>();
             let face: f64 = held.iter().map(|b| b.face).sum();
@@ -81,6 +91,13 @@ impl IndexerApp {
                         theme::stat(ui, "Coming in 30 days", &money(within(30)), Some(if within(30) > 0.0 { p.accent } else { p.muted }));
                         theme::stat(ui, "Coming in 90 days", &money(within(90)), None);
                         theme::stat(ui, "Coupons still to come", &money(coupons), Some(p.gain));
+                    });
+                    ui.add_space(6.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(theme::eyebrow(ui, &format!("Across {} of {} accounts", by_account.len(), all.len())));
+                        for (number, n, value) in &by_account {
+                            theme::tone_pill(ui, &format!("{} · {n} bond{} · {}", masked(number), if *n == 1 { "" } else { "s" }, money(*value)), Tone::Neutral);
+                        }
                     });
                 });
 
@@ -103,9 +120,10 @@ impl IndexerApp {
                         .column(Column::exact(90.0))
                         .column(Column::initial(240.0).clip(true))
                         .column(Column::exact(96.0))
+                        .column(Column::exact(84.0))
                         .column(Column::initial(110.0))
                         .header(24.0, |mut h| {
-                            for l in ["Arrives", "", "Type", "Bond", "CUSIP", "Amount"] {
+                            for l in ["Arrives", "", "Type", "Bond", "CUSIP", "Account", "Amount"] {
                                 h.col(|ui| {
                                     ui.label(theme::eyebrow(ui, l));
                                 });
@@ -158,6 +176,12 @@ impl IndexerApp {
                                         if soon {
                                             theme::row_tint(ui, p.warn_soft);
                                         }
+                                        ui.label(RichText::new(masked(&x.account)).font(theme::mono(12.5)).color(p.ink));
+                                    });
+                                    row.col(|ui| {
+                                        if soon {
+                                            theme::row_tint(ui, p.warn_soft);
+                                        }
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                             ui.label(RichText::new(money(x.amount)).font(theme::mono_semibold(13.0)));
                                         });
@@ -189,6 +213,7 @@ impl IndexerApp {
                             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                             .column(Column::initial(220.0).clip(true))
                             .column(Column::exact(96.0))
+                            .column(Column::exact(84.0))
                             .columns(Column::initial(92.0), 3)
                             .columns(Column::initial(104.0), 6)
                             .header(26.0, |mut h| {
@@ -212,6 +237,9 @@ impl IndexerApp {
                                         });
                                         row.col(|ui| {
                                             ui.label(RichText::new(&b.cusip).font(theme::mono(12.5)).color(p.muted));
+                                        });
+                                        row.col(|ui| {
+                                            ui.label(RichText::new(masked(&b.account)).font(theme::mono(12.5)).color(p.ink));
                                         });
                                         row.col(|ui| {
                                             if b.is_bill() {
@@ -256,7 +284,7 @@ impl IndexerApp {
                     self.bond_sort = Some(match self.bond_sort {
                         Some((c, asc)) if c == col => (col, !asc),
                         // Text and dates ascend first; amounts largest first.
-                        _ => (col, matches!(col, 0 | 1 | 3 | 4)),
+                        _ => (col, matches!(col, 0 | 1 | 2 | 4 | 5)),
                     });
                 }
             });
@@ -274,20 +302,21 @@ fn compare(a: &Bond, b: &Bond, col: usize, t: NaiveDate) -> Ordering {
     let num = |x: &Bond| -> f64 {
         let c = x.remaining_coupons(t);
         match col {
-            2 => x.coupon_rate,
-            5 => x.face,
-            6 => x.cost,
-            7 => x.market_value,
-            8 => c,
-            9 => x.face + c,
-            10 => x.face + c - x.cost,
+            3 => x.coupon_rate,
+            6 => x.face,
+            7 => x.cost,
+            8 => x.market_value,
+            9 => c,
+            10 => x.face + c,
+            11 => x.face + c - x.cost,
             _ => 0.0,
         }
     };
     match col {
         0 => a.description.cmp(&b.description),
         1 => a.cusip.cmp(&b.cusip),
-        3 | 4 => a.maturity.cmp(&b.maturity),
+        2 => a.account.cmp(&b.account),
+        4 | 5 => a.maturity.cmp(&b.maturity),
         _ => num(a).total_cmp(&num(b)),
     }
     .then_with(|| a.maturity.cmp(&b.maturity))

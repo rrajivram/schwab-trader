@@ -46,6 +46,9 @@ pub struct Plan {
     pub planned_proceeds: f64,
     /// Final guard: nothing on this list is ever sent.
     pub do_not_transact: HashSet<String>,
+    /// The account to trade in, by full number. Resolved to a fresh hash
+    /// at run time; never "the first account", since there are several.
+    pub account_number: String,
 }
 
 #[derive(Debug, Clone)]
@@ -107,7 +110,11 @@ async fn run_inner(plan: &Plan, cancel: &AtomicBool, emit: &(impl Fn(ExecEvent) 
 
     // Account hashes go stale, so always resolve it live right before trading.
     let hashes = accounts::list_account_numbers().await?;
-    let hash = hashes.first().context("This token has no linked accounts")?;
+    let hash = hashes
+        .iter()
+        .find(|h| !plan.account_number.is_empty() && h.account_number == plan.account_number)
+        .with_context(|| format!("account {} isn't linked to this login", accounts::masked(&plan.account_number)))?;
+    emit(ExecEvent::Note(format!("Trading in account {}", accounts::masked(&hash.account_number))));
     let account = accounts::get_account(hash).await?;
     let cash_needed = plan.amount - plan.planned_proceeds;
     if cash_needed > account.cash_balance + 0.01 {
@@ -294,6 +301,7 @@ mod tests {
             amount: 20.0,
             planned_proceeds: 0.0,
             do_not_transact: HashSet::from(["B".to_string()]),
+            account_number: "12345678".into(),
         };
         assert!(validate(&plan).unwrap_err().to_string().contains("B is on the do-not-transact list"));
     }

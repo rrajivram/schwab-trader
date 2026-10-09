@@ -16,7 +16,8 @@ pub enum Msg {
     TokenChecked(Result<(), String>),
     LoginBegun(Result<String, String>),
     LoginCompleted(Result<(), String>),
-    AccountLoaded(Result<accounts::Account, String>),
+    /// Every linked account (one failing to load doesn't hide the rest).
+    AccountsLoaded(Result<Vec<accounts::Account>, String>),
     UniverseLoaded(Result<universe::Universe, String>),
     MarketLoaded(Result<HashMap<String, api::MarketData>, String>),
     DividendsLoaded(Result<HashMap<String, f64>, String>),
@@ -85,20 +86,10 @@ impl Worker {
         });
     }
 
-    /// The token only has access to a single account, so take the first one.
-    /// The hash is re-fetched every time rather than cached (hashes go stale).
-    pub fn load_account(&self) {
-        self.spawn(async {
-            let result = async {
-                let hashes = accounts::list_account_numbers().await?;
-                let first = hashes
-                    .first()
-                    .ok_or_else(|| anyhow::anyhow!("This token has no linked accounts"))?;
-                accounts::get_account(first).await
-            }
-            .await;
-            Msg::AccountLoaded(result.map_err(|e| e.to_string()))
-        });
+    /// All linked accounts, re-fetched every time rather than cached (hashes
+    /// go stale). The app picks the equities account out by number.
+    pub fn load_accounts(&self) {
+        self.spawn(async { Msg::AccountsLoaded(accounts::list_accounts().await.map_err(|e| e.to_string())) });
     }
 
     pub fn load_universe(&self, force: bool) {
