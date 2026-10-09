@@ -45,6 +45,13 @@ async fn auto_basket_on_live_data() {
     assert_eq!(picks.len(), 13);
 }
 
+/// The configured equities account, resolved the way the indexer does.
+async fn equities_account_number() -> String {
+    let all = accounts::list_accounts().await.expect("accounts");
+    let suffix = schwab::config::Config::load().expect("config").equities_account();
+    accounts::by_suffix(&all, &suffix).expect("equities account").account_number.clone()
+}
+
 /// Full order flow in PREVIEW mode: live account lookup + cash check, a
 /// sell and buys built into request bodies. Nothing is sent to Schwab.
 #[tokio::test]
@@ -68,6 +75,7 @@ async fn preview_order_run_sends_nothing() {
         amount: 0.0123 * 480.0 + 0.05 * 87.0,
         planned_proceeds: 12.0,
         do_not_transact: Default::default(),
+        account_number: equities_account_number().await,
     };
     let events = Arc::new(Mutex::new(Vec::new()));
     let sink = events.clone();
